@@ -119,7 +119,6 @@ impl<'de> Deserialize<'de> for RtonValue {
                 Ok(RtonValue::Double(value))
             }
 
-            // Removed hex-string parsing logic. Strings are now strictly Strings.
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: de::Error,
