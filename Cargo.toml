@@ -2,6 +2,8 @@
 name = "serde_rton"
 version = "0.1.0"
 edition = "2024"
+authors = ["ed1th"]
+categories = ["encoding", "parser-implementations"]
 readme = "README.md"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/LambdaEd1th/serde_rton"
