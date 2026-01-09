@@ -23,22 +23,16 @@ fn test_rton_to_yaml_and_back() {
     println!("✅ RTON deserialized successfully.");
 
     // 4. Rust Struct -> YAML String
-    // YAML is safer than TOML for this data because:
-    // a. It supports 'null'.
-    // b. It handles complex nested structures better.
-    // c. Our '0x...' hex string logic for UInt64 works perfectly here (YAML sees it as a string).
     let yaml_string = serde_yaml::to_string(&rton_value).expect("Failed to serialize to YAML");
 
     fs::write(yaml_out_path, &yaml_string).expect("Failed to write test.yaml");
     println!("📝 Converted to YAML and saved to: {:?}", yaml_out_path);
 
     // 5. YAML String -> Rust Struct (RtonValue)
-    // Read back to verify data integrity (round-trip)
     let rton_value_from_yaml: RtonValue =
         serde_yaml::from_str(&yaml_string).expect("Failed to deserialize YAML");
 
     // 6. Rust Struct -> RTON Bytes
-    // Write back to binary RTON format
     let rton_data_new = to_bytes(&rton_value_from_yaml).expect("Failed to serialize back to RTON");
 
     fs::write(rton_out_path, &rton_data_new).expect("Failed to write test_new.rton");

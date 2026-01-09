@@ -23,9 +23,6 @@ fn test_rton_to_json_and_back() {
     println!("✅ RTON deserialized successfully.");
 
     // 4. Rust Struct -> JSON String
-    // We use serde_json to convert the structure to a readable JSON string.
-    // Note: Since we modified value.rs to serialize UInt64 as "0x..." strings,
-    // this will work perfectly in JSON without numeric overflow issues.
     let json_string =
         serde_json::to_string_pretty(&rton_value).expect("Failed to serialize to JSON");
 
@@ -33,8 +30,6 @@ fn test_rton_to_json_and_back() {
     println!("📝 Converted to JSON and saved to: {:?}", json_out_path);
 
     // 5. JSON String -> Rust Struct (RtonValue)
-    // Read back to verify data integrity (round-trip).
-    // The custom deserializer in value.rs will handle converting "0x..." strings back to UInt64.
     let rton_value_from_json: RtonValue =
         serde_json::from_str(&json_string).expect("Failed to deserialize JSON");
 
