@@ -3,19 +3,27 @@ use serde::ser::{self, SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// RtonValue supports all RTON types, including Binary Blobs and Ordered Multimaps.
+/// RtonValue supports all RTON types, including specific integer widths and Binary Blobs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtonValue {
     Null,
     Bool(bool),
+
+    // Specific Integer Types
+    Int8(i8),
+    UInt8(u8),
+    Int16(i16),
+    UInt16(u16),
+    Int32(i32),
+    UInt32(u32),
     Int64(i64),
     UInt64(u64),
+
     Float(f32),
     Double(f64),
     String(String),
-    Binary(Vec<u8>), // Support for 0x87 Binary Blob
+    Binary(Vec<u8>),
     Array(Vec<RtonValue>),
-    /// Used Vec<(String, Value)> to preserve insertion order and allow duplicate keys
     Object(Vec<(String, RtonValue)>),
 }
 
@@ -27,8 +35,17 @@ impl Serialize for RtonValue {
         match self {
             RtonValue::Null => serializer.serialize_none(),
             RtonValue::Bool(b) => serializer.serialize_bool(*b),
-            RtonValue::Int64(i) => serializer.serialize_i64(*i),
-            RtonValue::UInt64(u) => serializer.serialize_u64(*u),
+
+            // Serialize specific integers
+            RtonValue::Int8(v) => serializer.serialize_i8(*v),
+            RtonValue::UInt8(v) => serializer.serialize_u8(*v),
+            RtonValue::Int16(v) => serializer.serialize_i16(*v),
+            RtonValue::UInt16(v) => serializer.serialize_u16(*v),
+            RtonValue::Int32(v) => serializer.serialize_i32(*v),
+            RtonValue::UInt32(v) => serializer.serialize_u32(*v),
+            RtonValue::Int64(v) => serializer.serialize_i64(*v),
+            RtonValue::UInt64(v) => serializer.serialize_u64(*v),
+
             RtonValue::Float(f) => serializer.serialize_f32(*f),
             RtonValue::Double(d) => serializer.serialize_f64(*d),
             RtonValue::String(s) => serializer.serialize_str(s),
@@ -68,12 +85,33 @@ impl<'de> Deserialize<'de> for RtonValue {
             fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
                 Ok(RtonValue::Bool(value))
             }
+
+            // Capture specific types from the Deserializer
+            fn visit_i8<E>(self, value: i8) -> Result<Self::Value, E> {
+                Ok(RtonValue::Int8(value))
+            }
+            fn visit_u8<E>(self, value: u8) -> Result<Self::Value, E> {
+                Ok(RtonValue::UInt8(value))
+            }
+            fn visit_i16<E>(self, value: i16) -> Result<Self::Value, E> {
+                Ok(RtonValue::Int16(value))
+            }
+            fn visit_u16<E>(self, value: u16) -> Result<Self::Value, E> {
+                Ok(RtonValue::UInt16(value))
+            }
+            fn visit_i32<E>(self, value: i32) -> Result<Self::Value, E> {
+                Ok(RtonValue::Int32(value))
+            }
+            fn visit_u32<E>(self, value: u32) -> Result<Self::Value, E> {
+                Ok(RtonValue::UInt32(value))
+            }
             fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
                 Ok(RtonValue::Int64(value))
             }
             fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
                 Ok(RtonValue::UInt64(value))
             }
+
             fn visit_f32<E>(self, value: f32) -> Result<Self::Value, E> {
                 Ok(RtonValue::Float(value))
             }
@@ -81,12 +119,14 @@ impl<'de> Deserialize<'de> for RtonValue {
                 Ok(RtonValue::Double(value))
             }
 
+            // Removed hex-string parsing logic. Strings are now strictly Strings.
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
                 Ok(RtonValue::String(value.to_owned()))
             }
+
             fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
             where
                 E: de::Error,
