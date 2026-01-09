@@ -118,7 +118,7 @@ fn main() {
 | RTON Identifier | Rust Type | Notes |
 | --- | --- | --- |
 | `BoolTrue` / `BoolFalse` | `bool` |  |
-| `Int8` / `UInt8` | `u8` /  | `i8` |  |
+| `Int8` / `UInt8` | `u8` / `i8` |  |
 | `Int16` / `UInt16` | `i16` / `u16` |  |
 | `Int32` / `UInt32` | `i32` / `u32` |  |
 | `Int64` / `UInt64` | `i64` / `u64` | Native serialization (8 bytes) |
