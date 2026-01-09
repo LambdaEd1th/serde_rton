@@ -1,7 +1,9 @@
+use regex::Regex;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::{self, SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::fmt::Write; // For hex formatting
 
 /// RtonValue supports all RTON types, including specific integer widths and Binary Blobs.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +29,32 @@ pub enum RtonValue {
     Object(Vec<(String, RtonValue)>),
 }
 
+impl RtonValue {
+    pub fn new_int(v: i64) -> Self {
+        if (i8::MIN as i64..=i8::MAX as i64).contains(&v) {
+            RtonValue::Int8(v as i8)
+        } else if (i16::MIN as i64..=i16::MAX as i64).contains(&v) {
+            RtonValue::Int16(v as i16)
+        } else if (i32::MIN as i64..=i32::MAX as i64).contains(&v) {
+            RtonValue::Int32(v as i32)
+        } else {
+            RtonValue::Int64(v)
+        }
+    }
+
+    pub fn new_uint(v: u64) -> Self {
+        if v <= u8::MAX as u64 {
+            RtonValue::UInt8(v as u8)
+        } else if v <= u16::MAX as u64 {
+            RtonValue::UInt16(v as u16)
+        } else if v <= u32::MAX as u64 {
+            RtonValue::UInt32(v as u32)
+        } else {
+            RtonValue::UInt64(v)
+        }
+    }
+}
+
 impl Serialize for RtonValue {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -36,7 +64,6 @@ impl Serialize for RtonValue {
             RtonValue::Null => serializer.serialize_none(),
             RtonValue::Bool(b) => serializer.serialize_bool(*b),
 
-            // Serialize specific integers
             RtonValue::Int8(v) => serializer.serialize_i8(*v),
             RtonValue::UInt8(v) => serializer.serialize_u8(*v),
             RtonValue::Int16(v) => serializer.serialize_i16(*v),
@@ -46,10 +73,48 @@ impl Serialize for RtonValue {
             RtonValue::Int64(v) => serializer.serialize_i64(*v),
             RtonValue::UInt64(v) => serializer.serialize_u64(*v),
 
-            RtonValue::Float(f) => serializer.serialize_f32(*f),
-            RtonValue::Double(d) => serializer.serialize_f64(*d),
+            RtonValue::Float(f) => {
+                if serializer.is_human_readable() && !f.is_finite() {
+                    if f.is_nan() {
+                        serializer.serialize_str("NaN")
+                    } else if *f == f32::INFINITY {
+                        serializer.serialize_str("Infinity")
+                    } else {
+                        serializer.serialize_str("-Infinity")
+                    }
+                } else {
+                    serializer.serialize_f32(*f)
+                }
+            }
+            RtonValue::Double(d) => {
+                if serializer.is_human_readable() && !d.is_finite() {
+                    if d.is_nan() {
+                        serializer.serialize_str("NaN")
+                    } else if *d == f64::INFINITY {
+                        serializer.serialize_str("Infinity")
+                    } else {
+                        serializer.serialize_str("-Infinity")
+                    }
+                } else {
+                    serializer.serialize_f64(*d)
+                }
+            }
+
             RtonValue::String(s) => serializer.serialize_str(s),
-            RtonValue::Binary(b) => serializer.serialize_bytes(b),
+
+            // Binary as $BINARY string for JSON
+            RtonValue::Binary(b) => {
+                if serializer.is_human_readable() {
+                    let mut s = String::with_capacity(b.len() * 2);
+                    for byte in b {
+                        write!(&mut s, "{:02X}", byte).map_err(ser::Error::custom)?;
+                    }
+                    serializer.serialize_str(&format!("$BINARY(\"{}\", {})", s, b.len()))
+                } else {
+                    serializer.serialize_bytes(b)
+                }
+            }
+
             RtonValue::Array(vec) => {
                 let mut seq = serializer.serialize_seq(Some(vec.len()))?;
                 for element in vec {
@@ -86,7 +151,6 @@ impl<'de> Deserialize<'de> for RtonValue {
                 Ok(RtonValue::Bool(value))
             }
 
-            // Capture specific types from the Deserializer
             fn visit_i8<E>(self, value: i8) -> Result<Self::Value, E> {
                 Ok(RtonValue::Int8(value))
             }
@@ -106,10 +170,10 @@ impl<'de> Deserialize<'de> for RtonValue {
                 Ok(RtonValue::UInt32(value))
             }
             fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(RtonValue::Int64(value))
+                Ok(RtonValue::new_int(value))
             }
             fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(RtonValue::UInt64(value))
+                Ok(RtonValue::new_uint(value))
             }
 
             fn visit_f32<E>(self, value: f32) -> Result<Self::Value, E> {
@@ -123,6 +187,29 @@ impl<'de> Deserialize<'de> for RtonValue {
             where
                 E: de::Error,
             {
+                match value {
+                    "NaN" => return Ok(RtonValue::Double(f64::NAN)),
+                    "Infinity" | "+Infinity" => return Ok(RtonValue::Double(f64::INFINITY)),
+                    "-Infinity" => return Ok(RtonValue::Double(f64::NEG_INFINITY)),
+                    _ => {}
+                }
+
+                if value.starts_with("$BINARY(\"") {
+                    let re = Regex::new(r#"^\$BINARY\("([0-9A-Fa-f]*)",\s*(\d+)\)$"#)
+                        .map_err(de::Error::custom)?;
+                    if let Some(caps) = re.captures(value) {
+                        let hex_str = caps.get(1).map_or("", |m| m.as_str());
+                        let mut bytes = Vec::with_capacity(hex_str.len() / 2);
+                        for i in (0..hex_str.len()).step_by(2) {
+                            let byte_str = &hex_str[i..i + 2];
+                            let byte =
+                                u8::from_str_radix(byte_str, 16).map_err(de::Error::custom)?;
+                            bytes.push(byte);
+                        }
+                        return Ok(RtonValue::Binary(bytes));
+                    }
+                }
+
                 Ok(RtonValue::String(value.to_owned()))
             }
 
@@ -130,7 +217,7 @@ impl<'de> Deserialize<'de> for RtonValue {
             where
                 E: de::Error,
             {
-                Ok(RtonValue::String(value))
+                self.visit_str(&value)
             }
 
             fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>

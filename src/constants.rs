@@ -23,12 +23,9 @@ pub enum RtonIdentifier {
     BoolTrue = 0x01,
     SpecialStar = 0x02, // Represents the string "*"
 
-    // Integers - Fixed Width
-    Int8 = 0x08, // Typically used for unsigned byte (0..255) in this format
+    Int8 = 0x08,
     Int8Zero = 0x09,
 
-    // 0x0a was formerly SByte (Signed Byte), now renamed to UInt8 per user request.
-    // Logic maps i8 (signed) to this tag.
     UInt8 = 0x0a,
     UIntZero = 0x0b,
 
@@ -48,17 +45,15 @@ pub enum RtonIdentifier {
     UInt64Zero = 0x47,
 
     // Integers - VarInts
-    // 0x2x Range (Typically 32-bit logical)
     VarIntU32 = 0x24,
     VarIntI32 = 0x25, // ZigZag encoded
     VarIntU32Alternative = 0x28,
-    VarIntI32Alternative = 0x29, // ZigZag encoded
+    VarIntI32Alternative = 0x29,
 
-    // 0x4x Range (Typically 64-bit logical)
     VarIntU64 = 0x44,
     VarIntI64 = 0x45, // ZigZag encoded
     VarIntU64Alternative = 0x48,
-    VarIntI64Alternative = 0x49, // ZigZag encoded
+    VarIntI64Alternative = 0x49,
 
     // Floats
     Float = 0x22,
@@ -69,8 +64,8 @@ pub enum RtonIdentifier {
     // Strings
     StrAsciiDirect = 0x81,
     StrUtf8Direct = 0x82,
-    StrAsciiDef = 0x90, // Define Reference (interning)
-    StrAsciiRef = 0x91, // Use Reference (interning)
+    StrAsciiDef = 0x90,
+    StrAsciiRef = 0x91,
     StrUtf8Def = 0x92,
     StrUtf8Ref = 0x93,
 
@@ -78,7 +73,7 @@ pub enum RtonIdentifier {
     BinaryBlob = 0x87,
 
     // Special
-    Rtid = 0x83, // Resource Type ID
+    Rtid = 0x83,
     Null = 0x84,
 
     // Containers
@@ -86,11 +81,11 @@ pub enum RtonIdentifier {
     ArrayStart = 0x86,
 
     // Markers
-    ArraySize = 0xfd, // Indicates array size follows
+    ArraySize = 0xfd,
     ArrayEnd = 0xfe,
     ObjectEnd = 0xff,
 
-    // Extended / Unused Identifiers (Reserved or game specific)
+    // Extended / Unused Identifiers
     StrNativeX1 = 0xB0,
     StrNativeX2 = 0xB1,
     StrUnicodeX1 = 0xB2,
@@ -114,7 +109,8 @@ pub enum RtonIdentifier {
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum RtidIdentifier {
-    Zero = 0x00,   // RTID(0)
-    Uid = 0x02,    // Standard UID format (uid@path)
-    String = 0x03, // Double string format (str@str)
+    Zero = 0x00,
+    UidNoString = 0x01,
+    Uid = 0x02,
+    String = 0x03,
 }

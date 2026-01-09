@@ -10,13 +10,15 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("Invalid UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[error("Format Error: {0}")]
+    Fmt(#[from] std::fmt::Error),
     #[error("Invalid RTON Header")]
     InvalidHeader,
     #[error("Reference index out of bounds")]
     RefIndexOutOfBounds,
     #[error("RTON arrays require a known length in advance")]
     UnknownLength,
-    #[error("Unknown Tag Byte: {0:#04x}")]
+    #[error("Unknown Identifier Byte: {0:#04x}")]
     UnknownTag(u8),
     #[error("Unknown RTID sub-identifier: {0:#04x}")]
     UnknownRtidSubId(u8),

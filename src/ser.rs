@@ -94,6 +94,10 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     type SerializeTupleVariant = ser::Impossible<(), Error>;
     type SerializeStructVariant = ser::Impossible<(), Error>;
 
+    fn is_human_readable(&self) -> bool {
+        false
+    }
+
     fn serialize_bool(self, v: bool) -> Result<()> {
         self.writer.write_u8(if v {
             RtonIdentifier::BoolTrue as u8
@@ -102,8 +106,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         })?;
         Ok(())
     }
-
-    // --- Specific Integers ---
 
     fn serialize_i8(self, v: i8) -> Result<()> {
         if v == 0 {
@@ -232,11 +234,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
                     .map_err(|e| Error::Custom(e.to_string()))?;
 
                 if let Some(uid_caps) = uid_regex.captures(str_1) {
-                    self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
-                    self.writer.write_u8(RtidIdentifier::Uid as u8)?;
-
-                    self.write_direct_string_with_header(str_2)?;
-
                     let u1 = u32::from_str_radix(uid_caps.get(1).map_or("0", |m| m.as_str()), 16)
                         .unwrap_or(0);
                     let u2 = u32::from_str_radix(uid_caps.get(2).map_or("0", |m| m.as_str()), 16)
@@ -244,6 +241,18 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
                     let u3 = u32::from_str_radix(uid_caps.get(3).map_or("0", |m| m.as_str()), 16)
                         .unwrap_or(0);
 
+                    // CHECK: If str_2 (the path) is empty, use 0x01 (UidNoString) optimization
+                    if str_2.is_empty() {
+                        self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
+                        self.writer.write_u8(RtidIdentifier::UidNoString as u8)?;
+                    } else {
+                        // Use 0x02
+                        self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
+                        self.writer.write_u8(RtidIdentifier::Uid as u8)?;
+                        self.write_direct_string_with_header(str_2)?;
+                    }
+
+                    // Write UIDs (Order: val12, val11, x161) -> (u2, u1, u3)
                     self.writer.write_varint(u2 as u64)?;
                     self.writer.write_varint(u1 as u64)?;
                     self.writer.write_u32::<LittleEndian>(u3)?;
