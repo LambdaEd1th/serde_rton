@@ -3,7 +3,7 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::{self, SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fmt::Write; // For hex formatting
+use std::fmt::Write;
 
 /// RtonValue supports all RTON types, including specific integer widths and Binary Blobs.
 #[derive(Debug, Clone, PartialEq)]
