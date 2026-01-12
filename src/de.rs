@@ -79,7 +79,8 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             RtonIdentifier::BoolFalse => visitor.visit_bool(false),
             RtonIdentifier::BoolTrue => visitor.visit_bool(true),
 
-            RtonIdentifier::SpecialStar => visitor.visit_str("*"),
+            // 0x02 is NullString ("*")
+            RtonIdentifier::NullString => visitor.visit_str("*"),
 
             // Integers Zero Optimization
             RtonIdentifier::Int8Zero => visitor.visit_u8(0),
@@ -174,15 +175,32 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                 visitor.visit_string(s)
             }
 
-            // Binary (0x87)
+            // Binary
             RtonIdentifier::BinaryBlob => {
-                let len: u64 = self.reader.read_varint()?;
-                let mut buf = vec![0u8; len as usize];
-                self.reader.read_exact(&mut buf)?;
-                visitor.visit_byte_buf(buf)
+                let _ = self.reader.read_u8()?; // ignore 0x00 padding
+
+                // Read Hex String: VarInt(char_len) -> VarInt(byte_len) -> bytes
+                let _char_len: u64 = self.reader.read_varint()?;
+                let byte_len: u64 = self.reader.read_varint()?;
+                let mut hex_buf = vec![0u8; byte_len as usize];
+                self.reader.read_exact(&mut hex_buf)?;
+                let hex_str = String::from_utf8(hex_buf)?;
+
+                let _real_len: u64 = self.reader.read_varint()?; // Read original length (ignored)
+
+                // Decode Hex String to Vec<u8>
+                let mut bytes = Vec::with_capacity(hex_str.len() / 2);
+                for i in (0..hex_str.len()).step_by(2) {
+                    if i + 2 <= hex_str.len() {
+                        let byte = u8::from_str_radix(&hex_str[i..i + 2], 16)
+                            .map_err(|e| Error::Custom(e.to_string()))?;
+                        bytes.push(byte);
+                    }
+                }
+                visitor.visit_byte_buf(bytes)
             }
 
-            // RTID (0x83)
+            // RTID
             RtonIdentifier::Rtid => {
                 let sub_id_byte = self.reader.read_u8()?;
                 let sub_id = RtidIdentifier::try_from(sub_id_byte)
@@ -191,11 +209,7 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                 match sub_id {
                     RtidIdentifier::Zero => visitor.visit_str("RTID(0)"),
 
-                    // Added support for 0x01 (UidNoString)
                     RtidIdentifier::UidNoString => {
-                        // Read 2 VarInts then 1 UInt32LE.
-                        // Order is val12, val11, x161.
-                        // Format is val11.val12.x161@ (empty string)
                         let val12: u64 = self.reader.read_varint()?;
                         let val11: u64 = self.reader.read_varint()?;
                         let x161 = self.reader.read_u32::<LittleEndian>()?;
@@ -205,7 +219,6 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                     }
 
                     RtidIdentifier::Uid => {
-                        // 0x02
                         let _logic_len: u64 = self.reader.read_varint()?;
                         let byte_len: u64 = self.reader.read_varint()?;
                         let mut buf = vec![0u8; byte_len as usize];
@@ -221,7 +234,6 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                         visitor.visit_string(formatted)
                     }
                     RtidIdentifier::String => {
-                        // 0x03
                         let _len1: u64 = self.reader.read_varint()?;
                         let size1: u64 = self.reader.read_varint()?;
                         let mut buf1 = vec![0u8; size1 as usize];
@@ -240,8 +252,13 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                 }
             }
 
-            RtonIdentifier::Null => visitor.visit_none(),
+            // 0x84 is RTID(0) string
+            RtonIdentifier::RtidZero => visitor.visit_str("RTID(0)"),
 
+            // Null was removed as distinct generic variant, use NullString if needed for *
+            // RtonIdentifier::Null => visitor.visit_none(), // REMOVED
+
+            // Array
             RtonIdentifier::ArrayStart => {
                 let marker = self.reader.read_u8()?;
                 if marker != RtonIdentifier::ArraySize as u8 {
@@ -251,8 +268,10 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                 visitor.visit_seq(RtonSeqAccess::new(self, len as usize))
             }
 
+            // Object
             RtonIdentifier::ObjectStart => visitor.visit_map(RtonMapAccess::new(self)),
 
+            // Extended Identifiers
             RtonIdentifier::ObjectStartX1
             | RtonIdentifier::ArrayStartX1
             | RtonIdentifier::StrNativeX1
@@ -264,9 +283,16 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             | RtonIdentifier::StrNativeOrUnicodeX2
             | RtonIdentifier::StrNativeOrUnicodeX3
             | RtonIdentifier::StrNativeOrUnicodeX4
-            | RtonIdentifier::StrBinaryBlobX1
-            | RtonIdentifier::BoolX1 => Err(Error::UnsupportedExtendedTag(format!("{:?}", tag))),
+            | RtonIdentifier::StrBinaryBlobX1 => {
+                Err(Error::UnsupportedExtendedTag(format!("{:?}", tag)))
+            }
 
+            RtonIdentifier::BoolX1 => {
+                let b = self.reader.read_u8()?;
+                visitor.visit_bool(b != 0)
+            }
+
+            // Markers
             RtonIdentifier::ArraySize | RtonIdentifier::ArrayEnd | RtonIdentifier::ObjectEnd => {
                 Err(Error::UnexpectedMarker(format!("{:?}", tag)))
             }

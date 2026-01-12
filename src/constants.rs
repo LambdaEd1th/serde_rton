@@ -1,31 +1,24 @@
 use num_enum::TryFromPrimitive;
 
-// ============================================================================
-//  File Format Constants
-// ============================================================================
-
-/// Magic header bytes "RTON"
 pub const FILE_HEADER: &[u8] = b"RTON";
-/// Magic footer bytes "DONE"
 pub const FILE_FOOTER: &[u8] = b"DONE";
-/// Current supported version (0x00000001)
 pub const FILE_VERSION: u32 = 1;
 
-// ============================================================================
-//  RtonIdentifier Enum
-// ============================================================================
-
-/// Represents all valid single-byte identifiers (tags) in the RTON format.
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum RtonIdentifier {
     BoolFalse = 0x00,
     BoolTrue = 0x01,
-    SpecialStar = 0x02, // Represents the string "*"
 
+    // 0x02 represents the string "*", often treated as a null-string placeholder.
+    NullString = 0x02,
+
+    // Integers - Fixed Width
+    // 0x08 is SByte (Signed i8)
     Int8 = 0x08,
     Int8Zero = 0x09,
 
+    // 0x0A is Byte (Unsigned u8)
     UInt8 = 0x0a,
     UIntZero = 0x0b,
 
@@ -46,12 +39,12 @@ pub enum RtonIdentifier {
 
     // Integers - VarInts
     VarIntU32 = 0x24,
-    VarIntI32 = 0x25, // ZigZag encoded
+    VarIntI32 = 0x25,
     VarIntU32Alternative = 0x28,
     VarIntI32Alternative = 0x29,
 
     VarIntU64 = 0x44,
-    VarIntI64 = 0x45, // ZigZag encoded
+    VarIntI64 = 0x45,
     VarIntU64Alternative = 0x48,
     VarIntI64Alternative = 0x49,
 
@@ -74,7 +67,7 @@ pub enum RtonIdentifier {
 
     // Special
     Rtid = 0x83,
-    Null = 0x84,
+    RtidZero = 0x84, // "RTID(0)"
 
     // Containers
     ObjectStart = 0x85,
@@ -85,7 +78,7 @@ pub enum RtonIdentifier {
     ArrayEnd = 0xfe,
     ObjectEnd = 0xff,
 
-    // Extended / Unused Identifiers
+    // Extended
     StrNativeX1 = 0xB0,
     StrNativeX2 = 0xB1,
     StrUnicodeX1 = 0xB2,
@@ -98,14 +91,9 @@ pub enum RtonIdentifier {
     ArrayStartX1 = 0xB9,
     StrNativeX3 = 0xBA,
     StrBinaryBlobX1 = 0xBB,
-    BoolX1 = 0xBC,
+    BoolX1 = 0xBC, // Boolean followed by a byte
 }
 
-// ============================================================================
-//  RtidIdentifier Enum
-// ============================================================================
-
-/// Represents the sub-identifiers used within an RTID (Tag 0x83) structure.
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum RtidIdentifier {

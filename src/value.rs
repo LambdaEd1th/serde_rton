@@ -1,11 +1,10 @@
 use regex::Regex;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
-use serde::ser::{self, SerializeMap, SerializeSeq};
+use serde::ser::{self, Error as _, SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Write;
 
-/// RtonValue supports all RTON types, including specific integer widths and Binary Blobs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtonValue {
     Null,
@@ -102,12 +101,11 @@ impl Serialize for RtonValue {
 
             RtonValue::String(s) => serializer.serialize_str(s),
 
-            // Binary as $BINARY string for JSON
             RtonValue::Binary(b) => {
                 if serializer.is_human_readable() {
                     let mut s = String::with_capacity(b.len() * 2);
                     for byte in b {
-                        write!(&mut s, "{:02X}", byte).map_err(ser::Error::custom)?;
+                        write!(&mut s, "{:02X}", byte).map_err(S::Error::custom)?;
                     }
                     serializer.serialize_str(&format!("$BINARY(\"{}\", {})", s, b.len()))
                 } else {

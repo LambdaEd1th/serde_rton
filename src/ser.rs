@@ -1,9 +1,11 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use integer_encoding::VarIntWriter;
 use regex::Regex;
+use serde::ser::Error as _;
 use serde::{Serialize, ser};
 use std::collections::HashMap;
-use std::io::Write;
+use std::fmt::Write as FmtWrite;
+use std::io::Write; // For internal hex formatting
 
 use crate::constants::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtidIdentifier, RtonIdentifier};
 use crate::error::{Error, Result};
@@ -109,9 +111,9 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
 
     fn serialize_i8(self, v: i8) -> Result<()> {
         if v == 0 {
-            self.writer.write_u8(RtonIdentifier::UIntZero as u8)?;
+            self.writer.write_u8(RtonIdentifier::Int8Zero as u8)?;
         } else {
-            self.writer.write_u8(RtonIdentifier::UInt8 as u8)?;
+            self.writer.write_u8(RtonIdentifier::Int8 as u8)?;
             self.writer.write_i8(v)?;
         }
         Ok(())
@@ -119,9 +121,9 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
 
     fn serialize_u8(self, v: u8) -> Result<()> {
         if v == 0 {
-            self.writer.write_u8(RtonIdentifier::Int8Zero as u8)?;
+            self.writer.write_u8(RtonIdentifier::UIntZero as u8)?;
         } else {
-            self.writer.write_u8(RtonIdentifier::Int8 as u8)?;
+            self.writer.write_u8(RtonIdentifier::UInt8 as u8)?;
             self.writer.write_u8(v)?;
         }
         Ok(())
@@ -209,7 +211,11 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
 
     fn serialize_str(self, v: &str) -> Result<()> {
         if v == "*" {
-            self.writer.write_u8(RtonIdentifier::SpecialStar as u8)?;
+            self.writer.write_u8(RtonIdentifier::NullString as u8)?;
+            return Ok(());
+        }
+        if v == "RTID(0)" {
+            self.writer.write_u8(RtonIdentifier::RtidZero as u8)?;
             return Ok(());
         }
 
@@ -219,8 +225,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
             let content = caps.get(1).map_or("", |m| m.as_str());
 
             if content == "0" {
-                self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
-                self.writer.write_u8(RtidIdentifier::Zero as u8)?;
+                self.writer.write_u8(RtonIdentifier::RtidZero as u8)?;
                 return Ok(());
             }
 
@@ -241,18 +246,15 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
                     let u3 = u32::from_str_radix(uid_caps.get(3).map_or("0", |m| m.as_str()), 16)
                         .unwrap_or(0);
 
-                    // CHECK: If str_2 (the path) is empty, use 0x01 (UidNoString) optimization
                     if str_2.is_empty() {
                         self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
                         self.writer.write_u8(RtidIdentifier::UidNoString as u8)?;
                     } else {
-                        // Use 0x02
                         self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
                         self.writer.write_u8(RtidIdentifier::Uid as u8)?;
                         self.write_direct_string_with_header(str_2)?;
                     }
 
-                    // Write UIDs (Order: val12, val11, x161) -> (u2, u1, u3)
                     self.writer.write_varint(u2 as u64)?;
                     self.writer.write_varint(u1 as u64)?;
                     self.writer.write_u32::<LittleEndian>(u3)?;
@@ -272,13 +274,25 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
 
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
         self.writer.write_u8(RtonIdentifier::BinaryBlob as u8)?;
+        self.writer.write_u8(0)?; // Padding byte 0x00
+
+        // Create Hex String
+        let mut hex_str = String::with_capacity(v.len() * 2);
+        for b in v {
+            write!(&mut hex_str, "{:02X}", b).map_err(Error::custom)?;
+        }
+
+        // Write Hex String (VarInt char_len + VarInt byte_len + bytes)
+        self.write_direct_string_with_header(&hex_str)?;
+
+        // Write Original Length (VarInt)
         self.writer.write_varint(v.len() as u64)?;
-        self.writer.write_all(v)?;
+
         Ok(())
     }
 
     fn serialize_none(self) -> Result<()> {
-        self.writer.write_u8(RtonIdentifier::Null as u8)?;
+        self.writer.write_u8(RtonIdentifier::NullString as u8)?;
         Ok(())
     }
 
