@@ -9,16 +9,10 @@ pub const FILE_VERSION: u32 = 1;
 pub enum RtonIdentifier {
     BoolFalse = 0x00,
     BoolTrue = 0x01,
+    StrNull = 0x02,
 
-    // 0x02 represents the string "*", often treated as a null-string placeholder.
-    NullString = 0x02,
-
-    // Integers - Fixed Width
-    // 0x08 is SByte (Signed i8)
     Int8 = 0x08,
     Int8Zero = 0x09,
-
-    // 0x0A is Byte (Unsigned u8)
     UInt8 = 0x0a,
     UIntZero = 0x0b,
 
@@ -37,24 +31,21 @@ pub enum RtonIdentifier {
     UInt64 = 0x46,
     UInt64Zero = 0x47,
 
-    // Integers - VarInts
     VarIntU32 = 0x24,
     VarIntI32 = 0x25,
-    VarIntU32Alternative = 0x28,
-    VarIntI32Alternative = 0x29,
+    VarIntU32Alt = 0x28,
+    VarIntI32Alt = 0x29,
 
     VarIntU64 = 0x44,
     VarIntI64 = 0x45,
-    VarIntU64Alternative = 0x48,
-    VarIntI64Alternative = 0x49,
+    VarIntU64Alt = 0x48,
+    VarIntI64Alt = 0x49,
 
-    // Floats
     Float = 0x22,
     FloatZero = 0x23,
     Double = 0x42,
     DoubleZero = 0x43,
 
-    // Strings
     StrAsciiDirect = 0x81,
     StrUtf8Direct = 0x82,
     StrAsciiDef = 0x90,
@@ -62,23 +53,20 @@ pub enum RtonIdentifier {
     StrUtf8Def = 0x92,
     StrUtf8Ref = 0x93,
 
-    // Binary
     BinaryBlob = 0x87,
 
-    // Special
     Rtid = 0x83,
-    RtidZero = 0x84, // "RTID(0)"
+    RtidZero = 0x84,
 
-    // Containers
     ObjectStart = 0x85,
     ArrayStart = 0x86,
 
-    // Markers
-    ArraySize = 0xfd,
+    ArrayCapacity = 0xfd,
+
     ArrayEnd = 0xfe,
+
     ObjectEnd = 0xff,
 
-    // Extended
     StrNativeX1 = 0xB0,
     StrNativeX2 = 0xB1,
     StrUnicodeX1 = 0xB2,
@@ -91,7 +79,7 @@ pub enum RtonIdentifier {
     ArrayStartX1 = 0xB9,
     StrNativeX3 = 0xBA,
     StrBinaryBlobX1 = 0xBB,
-    BoolX1 = 0xBC, // Boolean followed by a byte
+    BoolX1 = 0xBC,
 }
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]

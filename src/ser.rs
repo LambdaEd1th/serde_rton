@@ -1,15 +1,32 @@
+use crate::constants::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtonIdentifier};
+use crate::error::{Error, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use integer_encoding::VarIntWriter;
-use regex::Regex;
-use serde::ser::Error as _;
 use serde::{Serialize, ser};
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use std::io::Write; // For internal hex formatting
+use std::io::Write;
 
-use crate::constants::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtidIdentifier, RtonIdentifier};
-use crate::error::{Error, Result};
+fn write_ascii_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
+    writer.write_varint(s.len() as u64)?;
+    writer.write_all(s.as_bytes())?;
+    Ok(())
+}
+fn write_utf8_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
+    writer.write_varint(s.chars().count() as u64)?;
+    writer.write_varint(s.len() as u64)?;
+    writer.write_all(s.as_bytes())?;
+    Ok(())
+}
 
+#[derive(PartialEq, Clone, Copy)]
+enum PendingVarInt {
+    None,
+    I32,
+    U32,
+    I64,
+    U64,
+}
 pub struct RtonSerializer<W> {
     writer: W,
     cache_90: HashMap<String, u32>,
@@ -17,6 +34,7 @@ pub struct RtonSerializer<W> {
     cache_92: HashMap<String, u32>,
     next_idx_92: u32,
     is_root: bool,
+    pending_varint: PendingVarInt,
 }
 
 impl<W: Write> RtonSerializer<W> {
@@ -28,31 +46,18 @@ impl<W: Write> RtonSerializer<W> {
             cache_92: HashMap::new(),
             next_idx_92: 0,
             is_root: true,
+            pending_varint: PendingVarInt::None,
         }
     }
-
-    fn write_direct_string_with_header(&mut self, v: &str) -> Result<()> {
-        let char_len = v.chars().count() as u64;
-        let bytes = v.as_bytes();
-        let byte_len = bytes.len() as u64;
-
-        self.writer.write_varint(char_len)?;
-        self.writer.write_varint(byte_len)?;
-        self.writer.write_all(bytes)?;
-        Ok(())
-    }
-
     fn write_interned_string(&mut self, v: &str) -> Result<()> {
         let is_ascii = v.is_ascii();
-
         if is_ascii {
             if let Some(&idx) = self.cache_90.get(v) {
                 self.writer.write_u8(RtonIdentifier::StrAsciiRef as u8)?;
                 self.writer.write_varint(idx as u64)?;
             } else {
                 self.writer.write_u8(RtonIdentifier::StrAsciiDef as u8)?;
-                self.writer.write_varint(v.len() as u64)?;
-                self.writer.write_all(v.as_bytes())?;
+                write_ascii_payload(&mut self.writer, v)?;
                 self.cache_90.insert(v.to_string(), self.next_idx_90);
                 self.next_idx_90 += 1;
             }
@@ -61,10 +66,7 @@ impl<W: Write> RtonSerializer<W> {
             self.writer.write_varint(idx as u64)?;
         } else {
             self.writer.write_u8(RtonIdentifier::StrUtf8Def as u8)?;
-            let bytes = v.as_bytes();
-            self.writer.write_varint(v.chars().count() as u64)?;
-            self.writer.write_varint(bytes.len() as u64)?;
-            self.writer.write_all(bytes)?;
+            write_utf8_payload(&mut self.writer, v)?;
             self.cache_92.insert(v.to_string(), self.next_idx_92);
             self.next_idx_92 += 1;
         }
@@ -76,10 +78,8 @@ pub fn to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     data.write_all(FILE_HEADER)?;
     data.write_u32::<LittleEndian>(FILE_VERSION)?;
-
     let mut serializer = RtonSerializer::new(&mut data);
     value.serialize(&mut serializer)?;
-
     data.write_all(FILE_FOOTER)?;
     Ok(data)
 }
@@ -90,16 +90,158 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     type SerializeSeq = Self;
     type SerializeMap = Self;
     type SerializeStruct = Self;
-
-    type SerializeTuple = ser::Impossible<(), Error>;
+    type SerializeTuple = Self;
     type SerializeTupleStruct = ser::Impossible<(), Error>;
     type SerializeTupleVariant = ser::Impossible<(), Error>;
     type SerializeStructVariant = ser::Impossible<(), Error>;
-
     fn is_human_readable(&self) -> bool {
         false
     }
-
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<()> {
+        match name {
+            "RTID" => {
+                self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
+                value.serialize(self)
+            }
+            "VarIntI32" => {
+                self.pending_varint = PendingVarInt::I32;
+                value.serialize(&mut *self)?;
+                self.pending_varint = PendingVarInt::None;
+                Ok(())
+            }
+            "VarIntU32" => {
+                self.pending_varint = PendingVarInt::U32;
+                value.serialize(&mut *self)?;
+                self.pending_varint = PendingVarInt::None;
+                Ok(())
+            }
+            "VarIntI64" => {
+                self.pending_varint = PendingVarInt::I64;
+                value.serialize(&mut *self)?;
+                self.pending_varint = PendingVarInt::None;
+                Ok(())
+            }
+            "VarIntU64" => {
+                self.pending_varint = PendingVarInt::U64;
+                value.serialize(&mut *self)?;
+                self.pending_varint = PendingVarInt::None;
+                Ok(())
+            }
+            _ => value.serialize(self),
+        }
+    }
+    fn serialize_i32(self, v: i32) -> Result<()> {
+        if self.pending_varint == PendingVarInt::I32 {
+            self.writer.write_u8(RtonIdentifier::VarIntI32 as u8)?;
+            self.writer.write_varint(v)?;
+            return Ok(());
+        }
+        if v == 0 {
+            self.writer.write_u8(RtonIdentifier::Int32Zero as u8)?;
+        } else {
+            self.writer.write_u8(RtonIdentifier::Int32 as u8)?;
+            self.writer.write_i32::<LittleEndian>(v)?;
+        }
+        Ok(())
+    }
+    fn serialize_u32(self, v: u32) -> Result<()> {
+        if self.pending_varint == PendingVarInt::U32 {
+            self.writer.write_u8(RtonIdentifier::VarIntU32 as u8)?;
+            self.writer.write_varint(v)?;
+            return Ok(());
+        }
+        if v == 0 {
+            self.writer.write_u8(RtonIdentifier::UInt32Zero as u8)?;
+        } else {
+            self.writer.write_u8(RtonIdentifier::UInt32 as u8)?;
+            self.writer.write_u32::<LittleEndian>(v)?;
+        }
+        Ok(())
+    }
+    fn serialize_i64(self, v: i64) -> Result<()> {
+        if self.pending_varint == PendingVarInt::I64 {
+            self.writer.write_u8(RtonIdentifier::VarIntI64 as u8)?;
+            self.writer.write_varint(v)?;
+            return Ok(());
+        }
+        if v == 0 {
+            self.writer.write_u8(RtonIdentifier::Int64Zero as u8)?;
+        } else {
+            self.writer.write_u8(RtonIdentifier::Int64 as u8)?;
+            self.writer.write_i64::<LittleEndian>(v)?;
+        }
+        Ok(())
+    }
+    fn serialize_u64(self, v: u64) -> Result<()> {
+        if self.pending_varint == PendingVarInt::U64 {
+            self.writer.write_u8(RtonIdentifier::VarIntU64 as u8)?;
+            self.writer.write_varint(v)?;
+            return Ok(());
+        }
+        if v == 0 {
+            self.writer.write_u8(RtonIdentifier::UInt64Zero as u8)?;
+        } else {
+            self.writer.write_u8(RtonIdentifier::UInt64 as u8)?;
+            self.writer.write_u64::<LittleEndian>(v)?;
+        }
+        Ok(())
+    }
+    fn serialize_unit_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+    ) -> Result<()> {
+        if name == "RTID" && variant_index == 0x84 {
+            self.writer.write_u8(RtonIdentifier::RtidZero as u8)?;
+            return Ok(());
+        }
+        self.writer.write_u8(variant_index as u8)?;
+        Ok(())
+    }
+    fn serialize_str(self, v: &str) -> Result<()> {
+        if v == "*" {
+            self.writer.write_u8(RtonIdentifier::StrNull as u8)?;
+            return Ok(());
+        }
+        if v == "RTID(0)" {
+            self.writer.write_u8(RtonIdentifier::RtidZero as u8)?;
+            return Ok(());
+        }
+        self.write_interned_string(v)
+    }
+    fn serialize_bytes(self, v: &[u8]) -> Result<()> {
+        self.writer.write_u8(RtonIdentifier::BinaryBlob as u8)?;
+        self.writer.write_u8(0)?;
+        let mut hex_str = String::with_capacity(v.len() * 2);
+        for b in v {
+            write!(&mut hex_str, "{:02X}", b)?;
+        }
+        write_ascii_payload(&mut self.writer, &hex_str)?;
+        self.writer.write_varint(v.len() as u64)?;
+        Ok(())
+    }
+    fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple> {
+        Ok(self)
+    }
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
+        let count = len.ok_or(Error::UnknownLength)?;
+        self.writer.write_u8(RtonIdentifier::ArrayStart as u8)?;
+        self.writer.write_u8(RtonIdentifier::ArrayCapacity as u8)?;
+        self.writer.write_varint(count as u64)?;
+        Ok(self)
+    }
+    fn serialize_none(self) -> Result<()> {
+        self.writer.write_u8(RtonIdentifier::StrNull as u8)?;
+        Ok(())
+    }
+    fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<()> {
+        value.serialize(self)
+    }
     fn serialize_bool(self, v: bool) -> Result<()> {
         self.writer.write_u8(if v {
             RtonIdentifier::BoolTrue as u8
@@ -108,7 +250,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         })?;
         Ok(())
     }
-
     fn serialize_i8(self, v: i8) -> Result<()> {
         if v == 0 {
             self.writer.write_u8(RtonIdentifier::Int8Zero as u8)?;
@@ -118,7 +259,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(())
     }
-
     fn serialize_u8(self, v: u8) -> Result<()> {
         if v == 0 {
             self.writer.write_u8(RtonIdentifier::UIntZero as u8)?;
@@ -128,7 +268,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(())
     }
-
     fn serialize_i16(self, v: i16) -> Result<()> {
         if v == 0 {
             self.writer.write_u8(RtonIdentifier::Int16Zero as u8)?;
@@ -138,7 +277,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(())
     }
-
     fn serialize_u16(self, v: u16) -> Result<()> {
         if v == 0 {
             self.writer.write_u8(RtonIdentifier::UInt16Zero as u8)?;
@@ -148,47 +286,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(())
     }
-
-    fn serialize_i32(self, v: i32) -> Result<()> {
-        if v == 0 {
-            self.writer.write_u8(RtonIdentifier::Int32Zero as u8)?;
-        } else {
-            self.writer.write_u8(RtonIdentifier::Int32 as u8)?;
-            self.writer.write_i32::<LittleEndian>(v)?;
-        }
-        Ok(())
-    }
-
-    fn serialize_u32(self, v: u32) -> Result<()> {
-        if v == 0 {
-            self.writer.write_u8(RtonIdentifier::UInt32Zero as u8)?;
-        } else {
-            self.writer.write_u8(RtonIdentifier::UInt32 as u8)?;
-            self.writer.write_u32::<LittleEndian>(v)?;
-        }
-        Ok(())
-    }
-
-    fn serialize_i64(self, v: i64) -> Result<()> {
-        if v == 0 {
-            self.writer.write_u8(RtonIdentifier::Int64Zero as u8)?;
-        } else {
-            self.writer.write_u8(RtonIdentifier::Int64 as u8)?;
-            self.writer.write_i64::<LittleEndian>(v)?;
-        }
-        Ok(())
-    }
-
-    fn serialize_u64(self, v: u64) -> Result<()> {
-        if v == 0 {
-            self.writer.write_u8(RtonIdentifier::UInt64Zero as u8)?;
-        } else {
-            self.writer.write_u8(RtonIdentifier::UInt64 as u8)?;
-            self.writer.write_u64::<LittleEndian>(v)?;
-        }
-        Ok(())
-    }
-
     fn serialize_f32(self, v: f32) -> Result<()> {
         if v == 0.0 {
             self.writer.write_u8(RtonIdentifier::FloatZero as u8)?;
@@ -198,7 +295,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(())
     }
-
     fn serialize_f64(self, v: f64) -> Result<()> {
         if v == 0.0 {
             self.writer.write_u8(RtonIdentifier::DoubleZero as u8)?;
@@ -208,106 +304,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(())
     }
-
-    fn serialize_str(self, v: &str) -> Result<()> {
-        if v == "*" {
-            self.writer.write_u8(RtonIdentifier::NullString as u8)?;
-            return Ok(());
-        }
-        if v == "RTID(0)" {
-            self.writer.write_u8(RtonIdentifier::RtidZero as u8)?;
-            return Ok(());
-        }
-
-        let rtid_regex = Regex::new(r"^RTID\((.*)\)$").map_err(|e| Error::Custom(e.to_string()))?;
-
-        if let Some(caps) = rtid_regex.captures(v) {
-            let content = caps.get(1).map_or("", |m| m.as_str());
-
-            if content == "0" {
-                self.writer.write_u8(RtonIdentifier::RtidZero as u8)?;
-                return Ok(());
-            }
-
-            let split_regex =
-                Regex::new(r"^(.*)@(.*)$").map_err(|e| Error::Custom(e.to_string()))?;
-            if let Some(parts) = split_regex.captures(content) {
-                let str_1 = parts.get(1).map_or("", |m| m.as_str());
-                let str_2 = parts.get(2).map_or("", |m| m.as_str());
-
-                let uid_regex = Regex::new(r"^([0-9a-fA-F]+)\.([0-9a-fA-F]+)\.([0-9a-fA-F]{8})$")
-                    .map_err(|e| Error::Custom(e.to_string()))?;
-
-                if let Some(uid_caps) = uid_regex.captures(str_1) {
-                    let u1 = u32::from_str_radix(uid_caps.get(1).map_or("0", |m| m.as_str()), 16)
-                        .unwrap_or(0);
-                    let u2 = u32::from_str_radix(uid_caps.get(2).map_or("0", |m| m.as_str()), 16)
-                        .unwrap_or(0);
-                    let u3 = u32::from_str_radix(uid_caps.get(3).map_or("0", |m| m.as_str()), 16)
-                        .unwrap_or(0);
-
-                    if str_2.is_empty() {
-                        self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
-                        self.writer.write_u8(RtidIdentifier::UidNoString as u8)?;
-                    } else {
-                        self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
-                        self.writer.write_u8(RtidIdentifier::Uid as u8)?;
-                        self.write_direct_string_with_header(str_2)?;
-                    }
-
-                    self.writer.write_varint(u2 as u64)?;
-                    self.writer.write_varint(u1 as u64)?;
-                    self.writer.write_u32::<LittleEndian>(u3)?;
-                } else {
-                    self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
-                    self.writer.write_u8(RtidIdentifier::String as u8)?;
-
-                    self.write_direct_string_with_header(str_2)?;
-                    self.write_direct_string_with_header(str_1)?;
-                }
-                return Ok(());
-            }
-        }
-
-        self.write_interned_string(v)
-    }
-
-    fn serialize_bytes(self, v: &[u8]) -> Result<()> {
-        self.writer.write_u8(RtonIdentifier::BinaryBlob as u8)?;
-        self.writer.write_u8(0)?; // Padding byte 0x00
-
-        // Create Hex String
-        let mut hex_str = String::with_capacity(v.len() * 2);
-        for b in v {
-            write!(&mut hex_str, "{:02X}", b).map_err(Error::custom)?;
-        }
-
-        // Write Hex String (VarInt char_len + VarInt byte_len + bytes)
-        self.write_direct_string_with_header(&hex_str)?;
-
-        // Write Original Length (VarInt)
-        self.writer.write_varint(v.len() as u64)?;
-
-        Ok(())
-    }
-
-    fn serialize_none(self) -> Result<()> {
-        self.writer.write_u8(RtonIdentifier::NullString as u8)?;
-        Ok(())
-    }
-
-    fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<()> {
-        value.serialize(self)
-    }
-
-    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
-        let count = len.ok_or(Error::UnknownLength)?;
-        self.writer.write_u8(RtonIdentifier::ArrayStart as u8)?;
-        self.writer.write_u8(RtonIdentifier::ArraySize as u8)?;
-        self.writer.write_varint(count as u64)?;
-        Ok(self)
-    }
-
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
         if self.is_root {
             self.is_root = false;
@@ -316,7 +312,6 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(self)
     }
-
     fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Self::SerializeStruct> {
         if self.is_root {
             self.is_root = false;
@@ -325,30 +320,14 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(self)
     }
-
     fn serialize_char(self, _v: char) -> Result<()> {
-        Err(Error::Custom("char not supported".into()))
+        Err(Error::Message("char not supported".into()))
     }
     fn serialize_unit(self) -> Result<()> {
         self.serialize_none()
     }
     fn serialize_unit_struct(self, _name: &'static str) -> Result<()> {
         self.serialize_none()
-    }
-    fn serialize_unit_variant(
-        self,
-        _name: &'static str,
-        _idx: u32,
-        _variant: &'static str,
-    ) -> Result<()> {
-        Err(Error::Custom("enum variants not supported".into()))
-    }
-    fn serialize_newtype_struct<T: ?Sized + Serialize>(
-        self,
-        _name: &'static str,
-        value: &T,
-    ) -> Result<()> {
-        value.serialize(self)
     }
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
         self,
@@ -357,18 +336,14 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         _variant: &'static str,
         _value: &T,
     ) -> Result<()> {
-        Err(Error::Custom("enum variants not supported".into()))
-    }
-
-    fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple> {
-        Err(Error::Custom("tuples not supported in RTON".into()))
+        Err(Error::Message("enum variants not supported".into()))
     }
     fn serialize_tuple_struct(
         self,
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleStruct> {
-        Err(Error::Custom("tuple structs not supported in RTON".into()))
+        Err(Error::Message("tuple structs not supported".into()))
     }
     fn serialize_tuple_variant(
         self,
@@ -377,7 +352,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         _variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
-        Err(Error::Custom("tuple variants not supported in RTON".into()))
+        Err(Error::Message("tuple variants not supported".into()))
     }
     fn serialize_struct_variant(
         self,
@@ -386,12 +361,9 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         _variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        Err(Error::Custom(
-            "struct variants not supported in RTON".into(),
-        ))
+        Err(Error::Message("struct variants not supported".into()))
     }
 }
-
 impl<W: Write> ser::SerializeSeq for &mut RtonSerializer<W> {
     type Ok = ();
     type Error = Error;
@@ -403,7 +375,6 @@ impl<W: Write> ser::SerializeSeq for &mut RtonSerializer<W> {
         Ok(())
     }
 }
-
 impl<W: Write> ser::SerializeMap for &mut RtonSerializer<W> {
     type Ok = ();
     type Error = Error;
@@ -418,7 +389,6 @@ impl<W: Write> ser::SerializeMap for &mut RtonSerializer<W> {
         Ok(())
     }
 }
-
 impl<W: Write> ser::SerializeStruct for &mut RtonSerializer<W> {
     type Ok = ();
     type Error = Error;
@@ -432,6 +402,16 @@ impl<W: Write> ser::SerializeStruct for &mut RtonSerializer<W> {
     }
     fn end(self) -> Result<()> {
         self.writer.write_u8(RtonIdentifier::ObjectEnd as u8)?;
+        Ok(())
+    }
+}
+impl<W: Write> ser::SerializeTuple for &mut RtonSerializer<W> {
+    type Ok = ();
+    type Error = Error;
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
+        value.serialize(&mut **self)
+    }
+    fn end(self) -> Result<()> {
         Ok(())
     }
 }
