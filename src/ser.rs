@@ -1,5 +1,3 @@
-use crate::constants::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtonIdentifier};
-use crate::error::{Error, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use integer_encoding::VarIntWriter;
 use serde::{Serialize, ser};
@@ -7,17 +5,38 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
+use crate::constants::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtonIdentifier};
+use crate::error::{Error, Result};
+
+// === Helper Functions for String Writing ===
+
 fn write_ascii_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
     writer.write_varint(s.len() as u64)?;
     writer.write_all(s.as_bytes())?;
     Ok(())
 }
+
 fn write_utf8_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
     writer.write_varint(s.chars().count() as u64)?;
     writer.write_varint(s.len() as u64)?;
     writer.write_all(s.as_bytes())?;
     Ok(())
 }
+
+// === Helper Functions for Header/Footer ===
+
+fn write_header<W: Write>(writer: &mut W) -> Result<()> {
+    writer.write_all(FILE_HEADER)?;
+    writer.write_u32::<LittleEndian>(FILE_VERSION)?;
+    Ok(())
+}
+
+fn write_footer<W: Write>(writer: &mut W) -> Result<()> {
+    writer.write_all(FILE_FOOTER)?;
+    Ok(())
+}
+
+// === Serializer Implementation ===
 
 #[derive(PartialEq, Clone, Copy)]
 enum PendingVarInt {
@@ -27,6 +46,7 @@ enum PendingVarInt {
     I64,
     U64,
 }
+
 pub struct RtonSerializer<W> {
     writer: W,
     cache_90: HashMap<String, u32>,
@@ -49,6 +69,7 @@ impl<W: Write> RtonSerializer<W> {
             pending_varint: PendingVarInt::None,
         }
     }
+
     fn write_interned_string(&mut self, v: &str) -> Result<()> {
         let is_ascii = v.is_ascii();
         if is_ascii {
@@ -74,19 +95,32 @@ impl<W: Write> RtonSerializer<W> {
     }
 }
 
+/// Serializes the given data structure to a RTON byte vector.
 pub fn to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    // Optimization: We could pre-allocate if we had a guess, but RTON size is variable.
     let mut data = Vec::new();
-    data.write_all(FILE_HEADER)?;
-    data.write_u32::<LittleEndian>(FILE_VERSION)?;
-    let mut serializer = RtonSerializer::new(&mut data);
-    value.serialize(&mut serializer)?;
-    data.write_all(FILE_FOOTER)?;
+    to_writer(&mut data, value)?;
     Ok(data)
+}
+
+/// Serializes the given data structure as RTON into the IO stream.
+pub fn to_writer<W: Write, T: Serialize>(mut writer: W, value: &T) -> Result<()> {
+    write_header(&mut writer)?;
+
+    // Create serializer borrowing the writer
+    {
+        let mut serializer = RtonSerializer::new(&mut writer);
+        value.serialize(&mut serializer)?;
+    }
+
+    write_footer(&mut writer)?;
+    Ok(())
 }
 
 impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     type Ok = ();
     type Error = Error;
+
     type SerializeSeq = Self;
     type SerializeMap = Self;
     type SerializeStruct = Self;
@@ -94,9 +128,11 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     type SerializeTupleStruct = ser::Impossible<(), Error>;
     type SerializeTupleVariant = ser::Impossible<(), Error>;
     type SerializeStructVariant = ser::Impossible<(), Error>;
+
     fn is_human_readable(&self) -> bool {
         false
     }
+
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
         self,
         name: &'static str,
@@ -134,6 +170,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
             _ => value.serialize(self),
         }
     }
+
     fn serialize_i32(self, v: i32) -> Result<()> {
         if self.pending_varint == PendingVarInt::I32 {
             self.writer.write_u8(RtonIdentifier::VarIntI32 as u8)?;
@@ -190,6 +227,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         Ok(())
     }
+
     fn serialize_unit_variant(
         self,
         name: &'static str,
@@ -203,6 +241,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         self.writer.write_u8(variant_index as u8)?;
         Ok(())
     }
+
     fn serialize_str(self, v: &str) -> Result<()> {
         if v == "*" {
             self.writer.write_u8(RtonIdentifier::StrNull as u8)?;
@@ -214,17 +253,21 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         }
         self.write_interned_string(v)
     }
+
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
         self.writer.write_u8(RtonIdentifier::BinaryBlob as u8)?;
         self.writer.write_u8(0)?;
+
         let mut hex_str = String::with_capacity(v.len() * 2);
         for b in v {
             write!(&mut hex_str, "{:02X}", b)?;
         }
+
         write_ascii_payload(&mut self.writer, &hex_str)?;
         self.writer.write_varint(v.len() as u64)?;
         Ok(())
     }
+
     fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple> {
         Ok(self)
     }
@@ -235,6 +278,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         self.writer.write_varint(count as u64)?;
         Ok(self)
     }
+
     fn serialize_none(self) -> Result<()> {
         self.writer.write_u8(RtonIdentifier::StrNull as u8)?;
         Ok(())
@@ -364,6 +408,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         Err(Error::Message("struct variants not supported".into()))
     }
 }
+
 impl<W: Write> ser::SerializeSeq for &mut RtonSerializer<W> {
     type Ok = ();
     type Error = Error;
