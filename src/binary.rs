@@ -22,28 +22,38 @@ impl FromStr for BinaryBlob {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // C# Format: $BINARY("HEX_STRING", RAW_LENGTH)
-        // Regex matches: $BINARY("...", 123)
         static BINARY_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
 
+        // Regex matches: $BINARY("...", 123)
         let re = BINARY_REGEX
             .get_or_init(|| Regex::new(r#"^\$BINARY\("([0-9a-fA-F]*)",\s*([0-9]+)\)$"#))
             .as_ref()
             .map_err(|e| Error::Regex(e.clone()))?;
 
+        // 1. Validate structure
         let caps = re.captures(s).ok_or_else(|| {
             Error::InvalidBinaryBlob("Format mismatch, expected $BINARY(\"hex\", len)".into())
         })?;
 
-        let hex_str = caps.get(1).unwrap().as_str();
-        let len_str = caps.get(2).unwrap().as_str();
+        // 2. Safe extraction of capture groups (removing unwrap)
+        let hex_str = caps
+            .get(1)
+            .ok_or_else(|| Error::InvalidBinaryBlob("Missing hex string capture".into()))?
+            .as_str();
 
+        let len_str = caps
+            .get(2)
+            .ok_or_else(|| Error::InvalidBinaryBlob("Missing length capture".into()))?
+            .as_str();
+
+        // 3. Parse length and content
         let declared_len = u64::from_str(len_str)
             .map_err(|_| Error::InvalidBinaryBlob("Invalid length number".into()))?;
 
-        // Hex string length implies byte length (2 chars = 1 byte)
+        // Validate consistency: Hex string length (chars) vs Declared Byte Length
         if (hex_str.len() as u64) / 2 != declared_len {
             return Err(Error::InvalidBinaryBlob(format!(
-                "Length mismatch: declared {}, but hex encodes {}",
+                "Length mismatch: declared {}, but hex string contains {} bytes",
                 declared_len,
                 hex_str.len() / 2
             )));
@@ -51,6 +61,7 @@ impl FromStr for BinaryBlob {
 
         let mut bytes = Vec::with_capacity(hex_str.len() / 2);
         for i in (0..hex_str.len()).step_by(2) {
+            // ? automatically converts ParseIntError -> Error::ParseInt
             let b = u8::from_str_radix(&hex_str[i..i + 2], 16)?;
             bytes.push(b);
         }
@@ -65,7 +76,6 @@ impl fmt::Display for BinaryBlob {
         for b in &self.0 {
             write!(f, "{:02X}", b)?;
         }
-        // Match C# format: ", {len})"
         write!(f, "\", {})", self.0.len())
     }
 }
