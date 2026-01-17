@@ -1,8 +1,9 @@
 use serde::{Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VarIntI32(pub i32);
-impl Serialize for VarIntI32 {
+pub struct VarInt<T>(pub T);
+
+impl Serialize for VarInt<i32> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -11,9 +12,7 @@ impl Serialize for VarIntI32 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VarIntU32(pub u32);
-impl Serialize for VarIntU32 {
+impl Serialize for VarInt<u32> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -22,9 +21,7 @@ impl Serialize for VarIntU32 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VarIntI64(pub i64);
-impl Serialize for VarIntI64 {
+impl Serialize for VarInt<i64> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -33,9 +30,7 @@ impl Serialize for VarIntI64 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VarIntU64(pub u64);
-impl Serialize for VarIntU64 {
+impl Serialize for VarInt<u64> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

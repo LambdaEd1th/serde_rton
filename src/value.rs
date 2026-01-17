@@ -1,18 +1,16 @@
+use crate::binary::BinaryBlob;
+use crate::rtid::Rtid;
+use crate::varint::VarInt;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::{self, SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-use crate::binary::BinaryBlob;
-use crate::rtid::Rtid;
-use crate::varint::{VarIntI32, VarIntI64, VarIntU32, VarIntU64};
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtonValue {
     Null,
     Bool(bool),
-
     Int8(i8),
     UInt8(u8),
     Int16(i16),
@@ -21,18 +19,15 @@ pub enum RtonValue {
     UInt32(u32),
     Int64(i64),
     UInt64(u64),
-
-    VarIntI32(VarIntI32),
-    VarIntU32(VarIntU32),
-    VarIntI64(VarIntI64),
-    VarIntU64(VarIntU64),
-
+    VarIntI32(VarInt<i32>),
+    VarIntU32(VarInt<u32>),
+    VarIntI64(VarInt<i64>),
+    VarIntU64(VarInt<u64>),
     Float(f32),
     Double(f64),
     String(String),
     Binary(BinaryBlob),
     Rtid(Rtid),
-
     Array(Vec<RtonValue>),
     Object(Vec<(String, RtonValue)>),
 }
@@ -49,7 +44,6 @@ impl RtonValue {
             RtonValue::Int64(v)
         }
     }
-
     pub fn new_uint(v: u64) -> Self {
         if v <= u8::MAX as u64 {
             RtonValue::UInt8(v as u8)
@@ -71,7 +65,6 @@ impl Serialize for RtonValue {
         match self {
             RtonValue::Null => serializer.serialize_none(),
             RtonValue::Bool(b) => serializer.serialize_bool(*b),
-
             RtonValue::Int8(v) => serializer.serialize_i8(*v),
             RtonValue::UInt8(v) => serializer.serialize_u8(*v),
             RtonValue::Int16(v) => serializer.serialize_i16(*v),
@@ -80,7 +73,6 @@ impl Serialize for RtonValue {
             RtonValue::UInt32(v) => serializer.serialize_u32(*v),
             RtonValue::Int64(v) => serializer.serialize_i64(*v),
             RtonValue::UInt64(v) => serializer.serialize_u64(*v),
-
             RtonValue::VarIntI32(v) => {
                 if serializer.is_human_readable() {
                     serializer.serialize_i32(v.0)
@@ -109,7 +101,6 @@ impl Serialize for RtonValue {
                     v.serialize(serializer)
                 }
             }
-
             RtonValue::Float(f) => {
                 if serializer.is_human_readable() && !f.is_finite() {
                     if f.is_nan() {
@@ -136,9 +127,7 @@ impl Serialize for RtonValue {
                     serializer.serialize_f64(*d)
                 }
             }
-
             RtonValue::String(s) => serializer.serialize_str(s),
-
             RtonValue::Binary(b) => {
                 if serializer.is_human_readable() {
                     serializer.serialize_str(&b.to_string())
@@ -146,7 +135,6 @@ impl Serialize for RtonValue {
                     b.serialize(serializer)
                 }
             }
-
             RtonValue::Rtid(rtid) => {
                 if serializer.is_human_readable() {
                     serializer.serialize_str(&rtid.to_string())
@@ -157,7 +145,6 @@ impl Serialize for RtonValue {
                     }
                 }
             }
-
             RtonValue::Array(vec) => {
                 let mut seq = serializer.serialize_seq(Some(vec.len()))?;
                 for element in vec {
@@ -182,14 +169,11 @@ impl<'de> Deserialize<'de> for RtonValue {
         D: de::Deserializer<'de>,
     {
         struct RtonValueVisitor;
-
         impl<'de> Visitor<'de> for RtonValueVisitor {
             type Value = RtonValue;
-
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("any valid RTON value")
             }
-
             fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
                 Ok(RtonValue::Bool(value))
             }
@@ -223,7 +207,6 @@ impl<'de> Deserialize<'de> for RtonValue {
             fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
                 Ok(RtonValue::Double(value))
             }
-
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: de::Error,
@@ -234,29 +217,24 @@ impl<'de> Deserialize<'de> for RtonValue {
                     "-Infinity" => return Ok(RtonValue::Double(f64::NEG_INFINITY)),
                     _ => {}
                 }
-
                 if value.starts_with("$BINARY(\"")
                     && let Ok(blob) = BinaryBlob::from_str(value)
                 {
                     return Ok(RtonValue::Binary(blob));
                 }
-
                 if value.starts_with("RTID(")
                     && let Ok(rtid) = Rtid::from_str(value)
                 {
                     return Ok(RtonValue::Rtid(rtid));
                 }
-
                 Ok(RtonValue::String(value.to_owned()))
             }
-
             fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
                 self.visit_str(&value)
             }
-
             fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
             where
                 E: de::Error,
@@ -269,18 +247,15 @@ impl<'de> Deserialize<'de> for RtonValue {
             {
                 Ok(RtonValue::Binary(BinaryBlob(v)))
             }
-
             fn visit_none<E>(self) -> Result<Self::Value, E> {
                 Ok(RtonValue::Null)
             }
-
             fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
             where
                 D: de::Deserializer<'de>,
             {
                 Deserialize::deserialize(deserializer)
             }
-
             fn visit_seq<V>(self, mut visitor: V) -> Result<Self::Value, V::Error>
             where
                 V: SeqAccess<'de>,
@@ -291,7 +266,6 @@ impl<'de> Deserialize<'de> for RtonValue {
                 }
                 Ok(RtonValue::Array(vec))
             }
-
             fn visit_map<V>(self, mut visitor: V) -> Result<Self::Value, V::Error>
             where
                 V: MapAccess<'de>,
@@ -303,7 +277,6 @@ impl<'de> Deserialize<'de> for RtonValue {
                 Ok(RtonValue::Object(entries))
             }
         }
-
         deserializer.deserialize_any(RtonValueVisitor)
     }
 }

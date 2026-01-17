@@ -13,6 +13,6 @@ pub use error::{Error, Result};
 pub use rtid::Rtid;
 pub use ser::to_bytes;
 pub use value::RtonValue;
-pub use varint::{VarIntI32, VarIntI64, VarIntU32, VarIntU64};
+pub use varint::VarInt;
 
 pub use constants::{RtidIdentifier, RtonIdentifier};
