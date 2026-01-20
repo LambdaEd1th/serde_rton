@@ -102,6 +102,20 @@ pub fn from_reader<R: Read + Seek, T: DeserializeOwned>(mut reader: R) -> Result
     Ok(value)
 }
 
+// Macro to generate simple forwarding deserialize methods
+macro_rules! forward_to_deserialize_any {
+    ($($method:ident),* $(,)?) => {
+        $(
+            fn $method<V>(self, visitor: V) -> Result<V::Value>
+            where
+                V: de::Visitor<'de>,
+            {
+                self.deserialize_any(visitor)
+            }
+        )*
+    };
+}
+
 impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R> {
     type Error = Error;
     fn is_human_readable(&self) -> bool {
@@ -270,127 +284,38 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
         }
     }
 
-    // ... forwarding methods ...
-    fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
+    forward_to_deserialize_any! {
+        deserialize_bool,
+        deserialize_i8, deserialize_i16, deserialize_i32, deserialize_i64,
+        deserialize_u8, deserialize_u16, deserialize_u32, deserialize_u64,
+        deserialize_f32, deserialize_f64,
+        deserialize_char, deserialize_str, deserialize_string,
+        deserialize_bytes, deserialize_byte_buf,
+        deserialize_option, deserialize_unit, deserialize_seq, deserialize_map,
+        deserialize_identifier, deserialize_ignored_any,
     }
-    fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_char<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
+
     fn deserialize_unit_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
         self.deserialize_any(visitor)
     }
+
     fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
         visitor.visit_newtype_struct(self)
     }
-    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
+
     fn deserialize_tuple<V>(self, _len: usize, visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
         self.deserialize_any(visitor)
     }
+
     fn deserialize_tuple_struct<V>(
         self,
         _name: &'static str,
@@ -402,12 +327,7 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
     {
         self.deserialize_any(visitor)
     }
-    fn deserialize_map<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
+
     fn deserialize_struct<V>(
         self,
         _name: &'static str,
@@ -419,6 +339,7 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
     {
         self.deserialize_any(visitor)
     }
+
     fn deserialize_enum<V>(
         self,
         _name: &'static str,
@@ -428,31 +349,9 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
     where
         V: de::Visitor<'de>,
     {
-        unimplemented!()
-    }
-    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.deserialize_any(visitor)
-    }
-    fn deserialize_bytes<V>(self, _visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        unimplemented!()
-    }
-    fn deserialize_byte_buf<V>(self, _visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        unimplemented!()
+        Err(Error::Message(
+            "RTON does not support enum deserialization".into(),
+        ))
     }
 }
 
