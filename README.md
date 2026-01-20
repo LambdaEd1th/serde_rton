@@ -15,7 +15,7 @@ RTON is a binary data format commonly used in PopCap framework games (e.g., *Pla
     * **String Interning**: Handles reference counting for strings (`StrAsciiRef`, `StrUtf8Ref`).
     * **Native RTID Support**: Parses and serializes Resource Type IDs (`0x83`).
     * **Order Preservation**: Object keys are maintained in their insertion order (critical for binary game data stability).
-* **Zero-Copy Deserialization**: Capable of borrowing string slices where possible (optimization pending implementation).
+* **Zero-Copy Deserialization**: Capable of borrowing string slices where possible.
 
 ## 📦 Installation
 
@@ -26,8 +26,7 @@ Add the following to your `Cargo.toml`:
 serde = { version = "1.0", features = ["derive"] }
 serde_rton = { path = "." } # If using locally
 # or via git:
-# serde_rton = { git = "[https://github.com/LambdaEd1th/serde_rton](https://github.com/LambdaEd1th/serde_rton)" }
-
+# serde_rton = { git = "https://github.com/LambdaEd1th/serde_rton" }
 ```
 
 ## 📖 Usage
@@ -98,7 +97,7 @@ fn main() -> serde_rton::Result<()> {
 
 You can use `serde_json` or `serde_yaml` to convert RTON data for debugging.
 
-> **⚠️ Note on `u64**`: RTON supports full 64-bit unsigned integers. Standard JSON parsers (like in JavaScript) may lose precision for numbers larger than . This library serializes `u64` as native numbers. If you need safe JSON interop for huge IDs, consider wrapping them or post-processing.
+> **⚠️ Note on `u64`**: RTON supports full 64-bit unsigned integers. Standard JSON parsers (like in JavaScript) may lose precision for numbers larger than `2^53 - 1` (`Number.MAX_SAFE_INTEGER`). This library serializes `u64` as native numbers. If you need safe JSON interop for huge IDs, consider wrapping them or post-processing.
 
 ```rust
 use serde_rton::{from_bytes, RtonValue};
@@ -118,7 +117,7 @@ fn main() {
 | RTON Identifier | Rust Type | Notes |
 | --- | --- | --- |
 | `BoolTrue` / `BoolFalse` | `bool` |  |
-| `Int8` / `UInt8` | `u8` / `i8` |  |
+| `Int8` / `UInt8` | `i8` / `u8` |  |
 | `Int16` / `UInt16` | `i16` / `u16` |  |
 | `Int32` / `UInt32` | `i32` / `u32` |  |
 | `Int64` / `UInt64` | `i64` / `u64` | Native serialization (8 bytes) |
@@ -139,6 +138,9 @@ fn main() {
 * **`src/ser.rs`**: Implementation of `serde::Serializer`.
 * **`src/de.rs`**: Implementation of `serde::Deserializer`.
 * **`src/error.rs`**: Custom error types (`serde_rton::Error`).
+* **`src/binary.rs`**: Binary read/write helper utilities.
+* **`src/rtid.rs`**: RTID (Resource Type ID) parsing and serialization.
+* **`src/varint.rs`**: Variable-length integer encoding/decoding.
 
 ## 🧪 Testing
 
