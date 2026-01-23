@@ -196,13 +196,26 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
 
             RtonIdentifier::StrUtf8Direct => {
                 let char_count: u64 = self.reader.read_varint()?;
-                let _byte_len: u64 = self.reader.read_varint()?;
-                visitor.visit_string(read_utf8_chars(&mut self.reader, char_count)?)
+                let byte_len: u64 = self.reader.read_varint()?;
+                let s = read_utf8_chars(&mut self.reader, char_count)?;
+                if s.len() as u64 != byte_len {
+                    return Err(Error::StringLengthMismatch {
+                        expected: byte_len,
+                        actual: s.len() as u64,
+                    });
+                }
+                visitor.visit_string(s)
             }
             RtonIdentifier::StrUtf8Def => {
                 let char_count: u64 = self.reader.read_varint()?;
-                let _byte_len: u64 = self.reader.read_varint()?;
+                let byte_len: u64 = self.reader.read_varint()?;
                 let s = read_utf8_chars(&mut self.reader, char_count)?;
+                if s.len() as u64 != byte_len {
+                    return Err(Error::StringLengthMismatch {
+                        expected: byte_len,
+                        actual: s.len() as u64,
+                    });
+                }
                 self.ref_table_92.push(s.clone());
                 visitor.visit_string(s)
             }
@@ -245,8 +258,14 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                     }
                     RtidIdentifier::Uid => {
                         let char_count: u64 = self.reader.read_varint()?;
-                        let _byte_len: u64 = self.reader.read_varint()?;
+                        let byte_len: u64 = self.reader.read_varint()?;
                         let name = read_utf8_chars(&mut self.reader, char_count)?;
+                        if name.len() as u64 != byte_len {
+                            return Err(Error::StringLengthMismatch {
+                                expected: byte_len,
+                                actual: name.len() as u64,
+                            });
+                        }
 
                         let v2: u64 = self.reader.read_varint()?;
                         let v1: u64 = self.reader.read_varint()?;
@@ -255,12 +274,24 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                     }
                     RtidIdentifier::String => {
                         let char_count1: u64 = self.reader.read_varint()?;
-                        let _bl1: u64 = self.reader.read_varint()?;
+                        let bl1: u64 = self.reader.read_varint()?;
                         let s1 = read_utf8_chars(&mut self.reader, char_count1)?;
+                        if s1.len() as u64 != bl1 {
+                            return Err(Error::StringLengthMismatch {
+                                expected: bl1,
+                                actual: s1.len() as u64,
+                            });
+                        }
 
                         let char_count2: u64 = self.reader.read_varint()?;
-                        let _bl2: u64 = self.reader.read_varint()?;
+                        let bl2: u64 = self.reader.read_varint()?;
                         let s2 = read_utf8_chars(&mut self.reader, char_count2)?;
+                        if s2.len() as u64 != bl2 {
+                            return Err(Error::StringLengthMismatch {
+                                expected: bl2,
+                                actual: s2.len() as u64,
+                            });
+                        }
 
                         visitor.visit_string(format!("RTID({}@{})", s1, s2))
                     }
