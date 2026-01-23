@@ -16,6 +16,8 @@ RTON is a binary data format commonly used in PopCap framework games (e.g., *Pla
     * **Native RTID Support**: Parses and serializes Resource Type IDs (`0x83`).
     * **Order Preservation**: Object keys are maintained in their insertion order (critical for binary game data stability).
 * **Zero-Copy Deserialization**: Capable of borrowing string slices where possible.
+* **Encryption Support**: Seamlessly handles Rijndael-192-CBC encrypted files commonly found in games.
+* **Robust Validation**: Ensures data integrity with UTF-8 string length checks.
 
 ## 📦 Installation
 
@@ -110,6 +112,34 @@ fn main() {
     println!("{}", json_output);
 }
 
+```
+
+### 🔒 Encryption Support
+
+RTON files can be encrypted using Rijndael-192-CBC (key derived from MD5 hash of a seed string). This library supports transparent decryption and encryption.
+
+```rust
+use serde_rton::{from_bytes_with_key, to_bytes_with_key, Result};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct SecureConfig {
+    api_key: String,
+}
+
+fn main() -> Result<()> {
+    let key_seed = "my_secret_seed"; // Key is derived from MD5(seed)
+    
+    // Reading encrypted file
+    let data = std::fs::read("encrypted.rton")?;
+    let config: SecureConfig = from_bytes_with_key(&data, Some(key_seed))?;
+    
+    // Writing encrypted file
+    let new_data = to_bytes_with_key(&config, Some(key_seed))?;
+    std::fs::write("encrypted_new.rton", new_data)?;
+    
+    Ok(())
+}
 ```
 
 ## 🧩 Data Type Mapping
