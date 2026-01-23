@@ -1,6 +1,8 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use integer_encoding::VarIntWriter;
 use serde::{Serialize, ser};
+use simple_rijndael::impls::RijndaelCbc;
+use simple_rijndael::paddings::ZeroPadding;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
@@ -97,14 +99,56 @@ impl<W: Write> RtonSerializer<W> {
 
 /// Serializes the given data structure to a RTON byte vector.
 pub fn to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    // Optimization: We could pre-allocate if we had a guess, but RTON size is variable.
+    to_bytes_with_key(value, None)
+}
+
+/// Serializes the given data structure to a RTON byte vector, with optional encryption key.
+pub fn to_bytes_with_key<T: Serialize>(value: &T, key_seed: Option<&str>) -> Result<Vec<u8>> {
     let mut data = Vec::new();
-    to_writer(&mut data, value)?;
+    to_writer_with_key(&mut data, value, key_seed)?;
     Ok(data)
 }
 
 /// Serializes the given data structure as RTON into the IO stream.
-pub fn to_writer<W: Write, T: Serialize>(mut writer: W, value: &T) -> Result<()> {
+pub fn to_writer<W: Write, T: Serialize>(writer: W, value: &T) -> Result<()> {
+    to_writer_with_key(writer, value, None)
+}
+
+/// Serializes the given data structure as RTON into the IO stream, with optional encryption key.
+pub fn to_writer_with_key<W: Write, T: Serialize>(
+    mut writer: W,
+    value: &T,
+    key_seed: Option<&str>,
+) -> Result<()> {
+    if let Some(key_str) = key_seed {
+        // Write Encrypted Header (u16 0x010 LE -> [0x10, 0x00])
+        writer.write_all(&[0x10, 0x00])?;
+
+        // Serialize content to buffer first
+        let mut buffer = Vec::new();
+        // Inner serialization writes standard RTON header + content + footer
+        to_writer(&mut buffer, value)?;
+
+        // Encrypt buffer
+        let digest = md5::compute(key_str).0;
+        let hex_string = hex::encode(digest);
+        let hex_bytes = hex_string.as_bytes();
+
+        let key = hex_bytes.to_vec();
+        let iv = hex_bytes[4..28].to_vec();
+        let block_size = 24;
+
+        let cipher = RijndaelCbc::<ZeroPadding>::new(&key, block_size)
+            .map_err(|e| Error::Message(format!("Cipher init failed: {:?}", e)))?;
+
+        let encrypted = cipher
+            .encrypt(&iv, buffer)
+            .map_err(|e| Error::Message(format!("Encryption failed: {:?}", e)))?;
+
+        writer.write_all(&encrypted)?;
+        return Ok(());
+    }
+
     write_header(&mut writer)?;
 
     // Create serializer borrowing the writer

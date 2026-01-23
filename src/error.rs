@@ -61,6 +61,12 @@ pub enum Error {
     #[error("String length mismatch: expected {expected} bytes, got {actual} bytes")]
     StringLengthMismatch { expected: u64, actual: u64 },
 
+    #[error("Decryption required but no key provided")]
+    MissingKey,
+
+    #[error("Decryption failed: {0}")]
+    DecryptionError(String),
+
     // === Serde Generic Catch-all ===
     // Used when serde calls Error::custom()
     #[error("{0}")]
