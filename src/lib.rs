@@ -13,7 +13,7 @@ pub use rtid::Rtid;
 pub use value::RtonValue;
 pub use varint::VarInt;
 
-pub use de::{from_bytes, from_reader};
-pub use ser::{to_bytes, to_writer};
+pub use de::{from_bytes, from_bytes_with_key, from_reader, from_reader_with_key};
+pub use ser::{to_bytes, to_bytes_with_key, to_writer, to_writer_with_key};
 
 pub use constants::{RtidIdentifier, RtonIdentifier};

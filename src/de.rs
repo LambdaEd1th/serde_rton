@@ -1,6 +1,8 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use integer_encoding::VarIntReader;
 use serde::de::{self, Deserialize, DeserializeOwned};
+use simple_rijndael::impls::RijndaelCbc;
+use simple_rijndael::paddings::ZeroPadding;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::constants::{FILE_HEADER, FILE_VERSION, RtidIdentifier, RtonIdentifier};
@@ -71,32 +73,113 @@ fn read_utf8_chars<R: Read>(reader: &mut R, count: u64) -> Result<String> {
     Ok(s)
 }
 
-// Helper: Validate RTON Header and Version
-fn validate_header<R: Read>(reader: &mut R) -> Result<()> {
-    let mut header = [0u8; 4];
-    reader.read_exact(&mut header)?;
-    if header != FILE_HEADER {
+// Helper: Validate RTON Header and Version, or Decrypt if encrypted matching key is provided
+// Returns:
+// - Ok(Some(Vec<u8>)) if encrypted and successfully decrypted (reader consumed).
+// - Ok(None) if standard RTON file (reader advanced past header/version).
+// Helper: Validate RTON Header and Version, or Decrypt if encrypted matching key is provided
+// Returns:
+// - Ok(Some(Vec<u8>)) if encrypted and successfully decrypted (reader consumed).
+// - Ok(None) if standard RTON file (reader advanced past header/version).
+fn validate_header_and_decrypt<R: Read>(
+    reader: &mut R,
+    key_seed: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
+    let mut header_start = [0u8; 2];
+    reader.read_exact(&mut header_start)?;
+
+    // Check for Encrypted Header (u16 0x010 LE -> [0x10, 0x00])
+    if header_start == [0x10, 0x00] {
+        let key_str = key_seed.ok_or(Error::MissingKey)?;
+
+        // Derive Key and IV from key_str (MD5)
+        let digest = md5::compute(key_str).0; // [u8; 16]
+        let hex_string = hex::encode(digest); // String (32 chars)
+        let hex_bytes = hex_string.as_bytes(); // &[u8] (32 bytes)
+
+        let key = hex_bytes.to_vec(); // 32 bytes (256 bits)
+        let iv = hex_bytes[4..28].to_vec(); // 24 bytes (192 bits)
+        let block_size = 24;
+
+        // Decrypt
+        let mut cipher_text = Vec::new();
+        reader.read_to_end(&mut cipher_text)?;
+
+        let cipher = RijndaelCbc::<ZeroPadding>::new(&key, block_size)
+            .map_err(|e| Error::DecryptionError(format!("Cipher init failed: {:?}", e)))?;
+
+        let decrypted = cipher
+            .decrypt(&iv, cipher_text)
+            .map_err(|e| Error::DecryptionError(format!("Decryption failed: {:?}", e)))?;
+
+        // Validating the inner content logic is handled by the caller recursively calling standard methods
+        return Ok(Some(decrypted));
+    }
+
+    // Not encrypted header, check if it matches first 2 bytes of RTON ("RT" -> 0x52 0x54)
+    if header_start != FILE_HEADER[0..2] {
         return Err(Error::InvalidHeader);
     }
+
+    // Read remaining 2 bytes of RTON header ("ON")
+    let mut header_end = [0u8; 2];
+    reader.read_exact(&mut header_end)?;
+    if header_end != FILE_HEADER[2..4] {
+        return Err(Error::InvalidHeader);
+    }
+
     let ver = reader.read_u32::<LittleEndian>()?;
     if ver != FILE_VERSION {
         return Err(Error::Message(format!("Unsupported version: {}", ver)));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Deserializes a RTON byte slice into a type.
 pub fn from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T> {
     let mut cursor = Cursor::new(bytes);
-    validate_header(&mut cursor)?;
+    // Passing None for key means if it encounters encrypted header, it returns MissingKey error.
+    let check = validate_header_and_decrypt(&mut cursor, None)?;
+    if check.is_some() {
+        // Should be unreachable because validate_header_and_decrypt returns Err if key is None and header is encrypted.
+        return Err(Error::Message("Unexpected decryption in from_bytes".into()));
+    }
+
+    let mut deserializer = RtonDeserializer::new(cursor);
+    let value = T::deserialize(&mut deserializer)?;
+    Ok(value)
+}
+
+/// Deserializes a RTON byte slice into a type, with optional decryption key.
+/// Note: Requires T to be DeserializeOwned because decryption produces new owned data.
+pub fn from_bytes_with_key<T: DeserializeOwned>(bytes: &[u8], key_seed: Option<&str>) -> Result<T> {
+    let mut cursor = Cursor::new(bytes);
+    let check = validate_header_and_decrypt(&mut cursor, key_seed)?;
+
+    if let Some(decrypted) = check {
+        return from_reader(Cursor::new(decrypted));
+    }
+
     let mut deserializer = RtonDeserializer::new(cursor);
     let value = T::deserialize(&mut deserializer)?;
     Ok(value)
 }
 
 /// Deserializes an IO stream into a type.
-pub fn from_reader<R: Read + Seek, T: DeserializeOwned>(mut reader: R) -> Result<T> {
-    validate_header(&mut reader)?;
+pub fn from_reader<R: Read + Seek, T: DeserializeOwned>(reader: R) -> Result<T> {
+    from_reader_with_key(reader, None)
+}
+
+/// Deserializes an IO stream into a type, with optional decryption key.
+pub fn from_reader_with_key<R: Read + Seek, T: DeserializeOwned>(
+    mut reader: R,
+    key_seed: Option<&str>,
+) -> Result<T> {
+    let check = validate_header_and_decrypt(&mut reader, key_seed)?;
+    if let Some(decrypted) = check {
+        return from_reader(Cursor::new(decrypted));
+    }
+
     let mut deserializer = RtonDeserializer::new(reader);
     let value = T::deserialize(&mut deserializer)?;
     Ok(value)
