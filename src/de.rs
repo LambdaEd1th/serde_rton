@@ -1,12 +1,10 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use integer_encoding::VarIntReader;
-use serde::de::{self, Deserialize, DeserializeOwned};
-use simple_rijndael::impls::RijndaelCbc;
-use simple_rijndael::paddings::ZeroPadding;
+use serde::de::{self, DeserializeOwned};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use crate::constants::{FILE_HEADER, FILE_VERSION, RtidIdentifier, RtonIdentifier};
 use crate::error::{Error, Result};
+use crate::types::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtidIdentifier, RtonIdentifier};
 
 pub struct RtonDeserializer<'de, R> {
     reader: R,
@@ -90,26 +88,12 @@ fn validate_header_and_decrypt<R: Read>(
 
     // Check for Encrypted Header (u16 0x010 LE -> [0x10, 0x00])
     if header_start == [0x10, 0x00] {
-        let key_str = key_seed.ok_or(Error::MissingKey)?;
-
-        // Derive Key and IV from key_str (MD5)
-        let digest = md5::compute(key_str).0; // [u8; 16]
-        let hex_string = hex::encode(digest); // String (32 chars)
-        let hex_bytes = hex_string.as_bytes(); // &[u8] (32 bytes)
-
-        let key = hex_bytes.to_vec(); // 32 bytes (256 bits)
-        let iv = hex_bytes[4..28].to_vec(); // 24 bytes (192 bits)
-        let block_size = 24;
-
-        // Decrypt
+        // Read ciphertext
         let mut cipher_text = Vec::new();
         reader.read_to_end(&mut cipher_text)?;
 
-        let cipher = RijndaelCbc::<ZeroPadding>::new(&key, block_size)
-            .map_err(|e| Error::DecryptionError(format!("Cipher init failed: {:?}", e)))?;
-
-        let decrypted = cipher
-            .decrypt(&iv, cipher_text)
+        // Decrypt using shared crypto module
+        let decrypted = crate::crypto::decrypt_data(&cipher_text, key_seed)
             .map_err(|e| Error::DecryptionError(format!("Decryption failed: {:?}", e)))?;
 
         // Validating the inner content logic is handled by the caller recursively calling standard methods
@@ -135,53 +119,62 @@ fn validate_header_and_decrypt<R: Read>(
     Ok(None)
 }
 
-/// Deserializes a RTON byte slice into a type.
-pub fn from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T> {
-    let mut cursor = Cursor::new(bytes);
-    // Passing None for key means if it encounters encrypted header, it returns MissingKey error.
-    let check = validate_header_and_decrypt(&mut cursor, None)?;
-    if check.is_some() {
-        // Should be unreachable because validate_header_and_decrypt returns Err if key is None and header is encrypted.
-        return Err(Error::Message("Unexpected decryption in from_bytes".into()));
+fn validate_footer<R: Read>(reader: &mut R) -> Result<()> {
+    let mut footer = [0u8; 4];
+    match reader.read_exact(&mut footer) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(Error::InvalidFooter);
+        }
+        Err(err) => return Err(Error::Io(err)),
     }
 
-    let mut deserializer = RtonDeserializer::new(cursor);
-    let value = T::deserialize(&mut deserializer)?;
-    Ok(value)
+    if footer != FILE_FOOTER {
+        return Err(Error::InvalidFooter);
+    }
+
+    let mut trailing = Vec::new();
+    reader.read_to_end(&mut trailing)?;
+    if trailing.iter().any(|&byte| byte != 0) {
+        return Err(Error::Message(
+            "Unexpected trailing data after DONE footer".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Deserializes a RTON byte slice into a type, with optional decryption key.
 /// Note: Requires T to be DeserializeOwned because decryption produces new owned data.
-pub fn from_bytes_with_key<T: DeserializeOwned>(bytes: &[u8], key_seed: Option<&str>) -> Result<T> {
+pub fn from_bytes<T: DeserializeOwned>(bytes: &[u8], key_seed: Option<&str>) -> Result<T> {
     let mut cursor = Cursor::new(bytes);
     let check = validate_header_and_decrypt(&mut cursor, key_seed)?;
 
     if let Some(decrypted) = check {
-        return from_reader(Cursor::new(decrypted));
+        // Recursively call from_reader with the decrypted data (no key needed for inner)
+        return from_reader(Cursor::new(decrypted), None);
     }
 
     let mut deserializer = RtonDeserializer::new(cursor);
     let value = T::deserialize(&mut deserializer)?;
+    validate_footer(&mut deserializer.reader)?;
     Ok(value)
 }
 
-/// Deserializes an IO stream into a type.
-pub fn from_reader<R: Read + Seek, T: DeserializeOwned>(reader: R) -> Result<T> {
-    from_reader_with_key(reader, None)
-}
-
 /// Deserializes an IO stream into a type, with optional decryption key.
-pub fn from_reader_with_key<R: Read + Seek, T: DeserializeOwned>(
+pub fn from_reader<R: Read + Seek, T: DeserializeOwned>(
     mut reader: R,
     key_seed: Option<&str>,
 ) -> Result<T> {
     let check = validate_header_and_decrypt(&mut reader, key_seed)?;
     if let Some(decrypted) = check {
-        return from_reader(Cursor::new(decrypted));
+        // Recursively call from_reader (no key needed for inner)
+        return from_reader(Cursor::new(decrypted), None);
     }
 
     let mut deserializer = RtonDeserializer::new(reader);
     let value = T::deserialize(&mut deserializer)?;
+    validate_footer(&mut deserializer.reader)?;
     Ok(value)
 }
 
@@ -239,12 +232,24 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             RtonIdentifier::Int64 => visitor.visit_i64(read_primitive!(self.reader, read_i64)),
             RtonIdentifier::UInt64 => visitor.visit_u64(read_primitive!(self.reader, read_u64)),
 
-            RtonIdentifier::VarIntU32 | RtonIdentifier::VarIntU32Alt => {
-                visitor.visit_u32(self.reader.read_varint::<u32>()?)
+            RtonIdentifier::VarIntU32 => {
+                let value = self.reader.read_varint::<u32>()?;
+                if let Ok(value) = i32::try_from(value) {
+                    visitor.visit_i32(value)
+                } else {
+                    visitor.visit_u32(value)
+                }
             }
-            RtonIdentifier::VarIntU64 | RtonIdentifier::VarIntU64Alt => {
-                visitor.visit_u64(self.reader.read_varint::<u64>()?)
+            RtonIdentifier::VarIntU32Alt => visitor.visit_u32(self.reader.read_varint::<u32>()?),
+            RtonIdentifier::VarIntU64 => {
+                let value = self.reader.read_varint::<u64>()?;
+                if let Ok(value) = i64::try_from(value) {
+                    visitor.visit_i64(value)
+                } else {
+                    visitor.visit_u64(value)
+                }
             }
+            RtonIdentifier::VarIntU64Alt => visitor.visit_u64(self.reader.read_varint::<u64>()?),
             RtonIdentifier::VarIntI32 | RtonIdentifier::VarIntI32Alt => {
                 visitor.visit_i32(self.reader.read_varint::<i32>()?)
             }
@@ -490,6 +495,9 @@ impl<'de, 'a, R: Read + Seek> de::SeqAccess<'de> for RtonSeqAccess<'a, 'de, R> {
         let mut buf = [0u8; 1];
         self.de.reader.read_exact(&mut buf)?;
         if buf[0] == RtonIdentifier::ArrayEnd as u8 {
+            if self.remaining_capacity != 0 {
+                return Err(Error::ArrayLengthMismatch);
+            }
             return Ok(None);
         }
         if self.remaining_capacity == 0 {
