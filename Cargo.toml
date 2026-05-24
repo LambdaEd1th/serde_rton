@@ -1,6 +1,6 @@
 [package]
-name = "rton"
-version = "0.1.1"
+name = "serde_rton"
+version = "0.2.0"
 edition = "2024"
 authors = ["ed1th"]
 categories = ["encoding", "parser-implementations"]
