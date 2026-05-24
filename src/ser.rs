@@ -1,14 +1,12 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use integer_encoding::VarIntWriter;
 use serde::{Serialize, ser};
-use simple_rijndael::impls::RijndaelCbc;
-use simple_rijndael::paddings::ZeroPadding;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
-use crate::constants::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtonIdentifier};
 use crate::error::{Error, Result};
+use crate::types::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtonIdentifier};
 
 // === Helper Functions for String Writing ===
 
@@ -23,6 +21,32 @@ fn write_utf8_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
     writer.write_varint(s.len() as u64)?;
     writer.write_all(s.as_bytes())?;
     Ok(())
+}
+
+fn varint_len_u32(mut value: u32) -> usize {
+    let mut len = 1;
+    while value > 0x7f {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
+fn varint_len_u64(mut value: u64) -> usize {
+    let mut len = 1;
+    while value > 0x7f {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
+fn zigzag_i32(value: i32) -> u32 {
+    ((value as u32) << 1) ^ ((value >> 31) as u32)
+}
+
+fn zigzag_i64(value: i64) -> u64 {
+    ((value as u64) << 1) ^ ((value >> 63) as u64)
 }
 
 // === Helper Functions for Header/Footer ===
@@ -57,6 +81,7 @@ pub struct RtonSerializer<W> {
     next_idx_92: u32,
     is_root: bool,
     pending_varint: PendingVarInt,
+    pending_rtid: bool,
 }
 
 impl<W: Write> RtonSerializer<W> {
@@ -69,6 +94,7 @@ impl<W: Write> RtonSerializer<W> {
             next_idx_92: 0,
             is_root: true,
             pending_varint: PendingVarInt::None,
+            pending_rtid: false,
         }
     }
 
@@ -97,25 +123,15 @@ impl<W: Write> RtonSerializer<W> {
     }
 }
 
-/// Serializes the given data structure to a RTON byte vector.
-pub fn to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    to_bytes_with_key(value, None)
-}
-
 /// Serializes the given data structure to a RTON byte vector, with optional encryption key.
-pub fn to_bytes_with_key<T: Serialize>(value: &T, key_seed: Option<&str>) -> Result<Vec<u8>> {
+pub fn to_bytes<T: Serialize>(value: &T, key_seed: Option<&str>) -> Result<Vec<u8>> {
     let mut data = Vec::new();
-    to_writer_with_key(&mut data, value, key_seed)?;
+    to_writer(&mut data, value, key_seed)?;
     Ok(data)
 }
 
-/// Serializes the given data structure as RTON into the IO stream.
-pub fn to_writer<W: Write, T: Serialize>(writer: W, value: &T) -> Result<()> {
-    to_writer_with_key(writer, value, None)
-}
-
 /// Serializes the given data structure as RTON into the IO stream, with optional encryption key.
-pub fn to_writer_with_key<W: Write, T: Serialize>(
+pub fn to_writer<W: Write, T: Serialize>(
     mut writer: W,
     value: &T,
     key_seed: Option<&str>,
@@ -127,22 +143,11 @@ pub fn to_writer_with_key<W: Write, T: Serialize>(
         // Serialize content to buffer first
         let mut buffer = Vec::new();
         // Inner serialization writes standard RTON header + content + footer
-        to_writer(&mut buffer, value)?;
+        // Recursively call to_writer with None key for inner unencrypted content
+        to_writer(&mut buffer, value, None)?;
 
-        // Encrypt buffer
-        let digest = md5::compute(key_str).0;
-        let hex_string = hex::encode(digest);
-        let hex_bytes = hex_string.as_bytes();
-
-        let key = hex_bytes.to_vec();
-        let iv = hex_bytes[4..28].to_vec();
-        let block_size = 24;
-
-        let cipher = RijndaelCbc::<ZeroPadding>::new(&key, block_size)
-            .map_err(|e| Error::Message(format!("Cipher init failed: {:?}", e)))?;
-
-        let encrypted = cipher
-            .encrypt(&iv, buffer)
+        // Encrypt buffer using shared crypto module
+        let encrypted = crate::crypto::encrypt_data(&buffer, Some(key_str))
             .map_err(|e| Error::Message(format!("Encryption failed: {:?}", e)))?;
 
         writer.write_all(&encrypted)?;
@@ -185,7 +190,10 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         match name {
             "RTID" => {
                 self.writer.write_u8(RtonIdentifier::Rtid as u8)?;
-                value.serialize(self)
+                self.pending_rtid = true;
+                let result = value.serialize(&mut *self);
+                self.pending_rtid = false;
+                result
             }
             "VarIntI32" => {
                 self.pending_varint = PendingVarInt::I32;
@@ -224,14 +232,30 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         if v == 0 {
             self.writer.write_u8(RtonIdentifier::Int32Zero as u8)?;
         } else {
-            self.writer.write_u8(RtonIdentifier::Int32 as u8)?;
-            self.writer.write_i32::<LittleEndian>(v)?;
+            let raw = v as u32;
+            let raw_len = varint_len_u32(raw);
+            let zigzag_len = varint_len_u32(zigzag_i32(v));
+
+            if raw_len >= 4 && zigzag_len >= 4 {
+                self.writer.write_u8(RtonIdentifier::Int32 as u8)?;
+                self.writer.write_i32::<LittleEndian>(v)?;
+            } else if zigzag_len < raw_len {
+                self.writer.write_u8(RtonIdentifier::VarIntI32 as u8)?;
+                self.writer.write_varint(v)?;
+            } else {
+                self.writer.write_u8(RtonIdentifier::VarIntU32 as u8)?;
+                self.writer.write_varint(raw)?;
+            }
         }
         Ok(())
     }
     fn serialize_u32(self, v: u32) -> Result<()> {
+        if self.pending_rtid {
+            self.writer.write_u32::<LittleEndian>(v)?;
+            return Ok(());
+        }
         if self.pending_varint == PendingVarInt::U32 {
-            self.writer.write_u8(RtonIdentifier::VarIntU32 as u8)?;
+            self.writer.write_u8(RtonIdentifier::VarIntU32Alt as u8)?;
             self.writer.write_varint(v)?;
             return Ok(());
         }
@@ -252,14 +276,30 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         if v == 0 {
             self.writer.write_u8(RtonIdentifier::Int64Zero as u8)?;
         } else {
-            self.writer.write_u8(RtonIdentifier::Int64 as u8)?;
-            self.writer.write_i64::<LittleEndian>(v)?;
+            let raw = v as u64;
+            let raw_len = varint_len_u64(raw);
+            let zigzag_len = varint_len_u64(zigzag_i64(v));
+
+            if raw_len >= 8 && zigzag_len >= 8 {
+                self.writer.write_u8(RtonIdentifier::Int64 as u8)?;
+                self.writer.write_i64::<LittleEndian>(v)?;
+            } else if zigzag_len < raw_len {
+                self.writer.write_u8(RtonIdentifier::VarIntI64 as u8)?;
+                self.writer.write_varint(v)?;
+            } else {
+                self.writer.write_u8(RtonIdentifier::VarIntU64 as u8)?;
+                self.writer.write_varint(raw)?;
+            }
         }
         Ok(())
     }
     fn serialize_u64(self, v: u64) -> Result<()> {
+        if self.pending_rtid {
+            self.writer.write_varint(v)?;
+            return Ok(());
+        }
         if self.pending_varint == PendingVarInt::U64 {
-            self.writer.write_u8(RtonIdentifier::VarIntU64 as u8)?;
+            self.writer.write_u8(RtonIdentifier::VarIntU64Alt as u8)?;
             self.writer.write_varint(v)?;
             return Ok(());
         }
@@ -287,6 +327,10 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     }
 
     fn serialize_str(self, v: &str) -> Result<()> {
+        if self.pending_rtid {
+            write_utf8_payload(&mut self.writer, v)?;
+            return Ok(());
+        }
         if v == "*" {
             self.writer.write_u8(RtonIdentifier::StrNull as u8)?;
             return Ok(());
@@ -386,10 +430,17 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     fn serialize_f64(self, v: f64) -> Result<()> {
         if v == 0.0 {
             self.writer.write_u8(RtonIdentifier::DoubleZero as u8)?;
-        } else {
-            self.writer.write_u8(RtonIdentifier::Double as u8)?;
-            self.writer.write_f64::<LittleEndian>(v)?;
+            return Ok(());
         }
+
+        // Downcast to f32. If their string representations are identical, serialize as f32.
+        let v32 = v as f32;
+        if format!("{}", v) == format!("{}", v32) {
+            return self.serialize_f32(v32);
+        }
+
+        self.writer.write_u8(RtonIdentifier::Double as u8)?;
+        self.writer.write_f64::<LittleEndian>(v)?;
         Ok(())
     }
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
