@@ -1,7 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use integer_encoding::VarIntReader;
 use serde::de::{self, DeserializeOwned};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{Error, Result};
 use crate::types::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtidIdentifier, RtonIdentifier};
@@ -71,44 +71,13 @@ fn read_utf8_chars<R: Read>(reader: &mut R, count: u64) -> Result<String> {
     Ok(s)
 }
 
-// Helper: Validate RTON Header and Version, or Decrypt if encrypted matching key is provided
-// Returns:
-// - Ok(Some(Vec<u8>)) if encrypted and successfully decrypted (reader consumed).
-// - Ok(None) if standard RTON file (reader advanced past header/version).
-// Helper: Validate RTON Header and Version, or Decrypt if encrypted matching key is provided
-// Returns:
-// - Ok(Some(Vec<u8>)) if encrypted and successfully decrypted (reader consumed).
-// - Ok(None) if standard RTON file (reader advanced past header/version).
-fn validate_header_and_decrypt<R: Read>(
-    reader: &mut R,
-    key_seed: Option<&str>,
-) -> Result<Option<Vec<u8>>> {
-    let mut header_start = [0u8; 2];
-    reader.read_exact(&mut header_start)?;
+/// Validate the standard RTON header: magic "RTON" and version.
+/// Advances the reader past the header.
+fn validate_header<R: Read>(reader: &mut R) -> Result<()> {
+    let mut header = [0u8; 4];
+    reader.read_exact(&mut header)?;
 
-    // Check for Encrypted Header (u16 0x010 LE -> [0x10, 0x00])
-    if header_start == [0x10, 0x00] {
-        // Read ciphertext
-        let mut cipher_text = Vec::new();
-        reader.read_to_end(&mut cipher_text)?;
-
-        // Decrypt using shared crypto module
-        let decrypted = crate::crypto::decrypt_data(&cipher_text, key_seed)
-            .map_err(|e| Error::DecryptionError(format!("Decryption failed: {:?}", e)))?;
-
-        // Validating the inner content logic is handled by the caller recursively calling standard methods
-        return Ok(Some(decrypted));
-    }
-
-    // Not encrypted header, check if it matches first 2 bytes of RTON ("RT" -> 0x52 0x54)
-    if header_start != FILE_HEADER[0..2] {
-        return Err(Error::InvalidHeader);
-    }
-
-    // Read remaining 2 bytes of RTON header ("ON")
-    let mut header_end = [0u8; 2];
-    reader.read_exact(&mut header_end)?;
-    if header_end != FILE_HEADER[2..4] {
+    if header != *FILE_HEADER {
         return Err(Error::InvalidHeader);
     }
 
@@ -116,7 +85,7 @@ fn validate_header_and_decrypt<R: Read>(
     if ver != FILE_VERSION {
         return Err(Error::Message(format!("Unsupported version: {}", ver)));
     }
-    Ok(None)
+    Ok(())
 }
 
 fn validate_footer<R: Read>(reader: &mut R) -> Result<()> {
@@ -144,33 +113,14 @@ fn validate_footer<R: Read>(reader: &mut R) -> Result<()> {
     Ok(())
 }
 
-/// Deserializes a RTON byte slice into a type, with optional decryption key.
-/// Note: Requires T to be DeserializeOwned because decryption produces new owned data.
-pub fn from_bytes<T: DeserializeOwned>(bytes: &[u8], key_seed: Option<&str>) -> Result<T> {
-    let mut cursor = Cursor::new(bytes);
-    let check = validate_header_and_decrypt(&mut cursor, key_seed)?;
-
-    if let Some(decrypted) = check {
-        // Recursively call from_reader with the decrypted data (no key needed for inner)
-        return from_reader(Cursor::new(decrypted), None);
-    }
-
-    let mut deserializer = RtonDeserializer::new(cursor);
-    let value = T::deserialize(&mut deserializer)?;
-    validate_footer(&mut deserializer.reader)?;
-    Ok(value)
+/// Deserializes a RTON byte slice into a type.
+pub fn from_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    from_reader(std::io::Cursor::new(bytes))
 }
 
-/// Deserializes an IO stream into a type, with optional decryption key.
-pub fn from_reader<R: Read + Seek, T: DeserializeOwned>(
-    mut reader: R,
-    key_seed: Option<&str>,
-) -> Result<T> {
-    let check = validate_header_and_decrypt(&mut reader, key_seed)?;
-    if let Some(decrypted) = check {
-        // Recursively call from_reader (no key needed for inner)
-        return from_reader(Cursor::new(decrypted), None);
-    }
+/// Deserializes an IO stream into a type.
+pub fn from_reader<R: Read + Seek, T: DeserializeOwned>(mut reader: R) -> Result<T> {
+    validate_header(&mut reader)?;
 
     let mut deserializer = RtonDeserializer::new(reader);
     let value = T::deserialize(&mut deserializer)?;
@@ -214,8 +164,8 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             RtonIdentifier::BoolTrue => visitor.visit_bool(true),
             RtonIdentifier::StrNull => visitor.visit_str("*"),
 
-            RtonIdentifier::Int8Zero => visitor.visit_u8(0),
-            RtonIdentifier::UIntZero => visitor.visit_i8(0),
+            RtonIdentifier::Int8Zero => visitor.visit_i8(0),
+            RtonIdentifier::UIntZero => visitor.visit_u8(0),
             RtonIdentifier::Int16Zero => visitor.visit_i16(0),
             RtonIdentifier::UInt16Zero => visitor.visit_u16(0),
             RtonIdentifier::Int32Zero => visitor.visit_i32(0),
@@ -395,9 +345,166 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                 visitor.visit_seq(RtonSeqAccess::new(self, capacity as usize))
             }
             RtonIdentifier::ObjectStart => visitor.visit_map(RtonMapAccess::new(self)),
-            RtonIdentifier::BoolX1 => {
+            RtonIdentifier::ObjectStartCompact => visitor.visit_map(RtonMapAccess::new(self)),
+
+            RtonIdentifier::ArrayStartCompact => {
+                // Compact arrays use the same capacity-prefix convention
+                // as standard arrays (0xFD + varint).
+                if self.reader.read_u8()? != RtonIdentifier::ArrayCapacity as u8 {
+                    return Err(Error::ArrayStartMismatch);
+                }
+                let capacity: u64 = self.reader.read_varint()?;
+                visitor.visit_seq(RtonSeqAccess::new(self, capacity as usize))
+            }
+
+            RtonIdentifier::RtidCompact => {
+                // Compact RTID — same sub-id structure as regular RTID (0x83).
+                let sub_id = RtidIdentifier::try_from(self.reader.read_u8()?)
+                    .map_err(|_| Error::UnknownRtidSubId(0))?;
+                match sub_id {
+                    RtidIdentifier::Zero => visitor.visit_str("RTID(0)"),
+                    RtidIdentifier::UidNoString => {
+                        let v2: u64 = self.reader.read_varint()?;
+                        let v1: u64 = self.reader.read_varint()?;
+                        let x = self.reader.read_u32::<LittleEndian>()?;
+                        visitor.visit_string(format!("RTID({:x}.{:x}.{:08x}@)", v1, v2, x))
+                    }
+                    RtidIdentifier::Uid => {
+                        let char_count: u64 = self.reader.read_varint()?;
+                        let byte_len: u64 = self.reader.read_varint()?;
+                        let name = read_utf8_chars(&mut self.reader, char_count)?;
+                        if name.len() as u64 != byte_len {
+                            return Err(Error::StringLengthMismatch {
+                                expected: byte_len,
+                                actual: name.len() as u64,
+                            });
+                        }
+                        let v2: u64 = self.reader.read_varint()?;
+                        let v1: u64 = self.reader.read_varint()?;
+                        let x = self.reader.read_u32::<LittleEndian>()?;
+                        visitor.visit_string(format!("RTID({:x}.{:x}.{:08x}@{})", v1, v2, x, name))
+                    }
+                    RtidIdentifier::String => {
+                        let char_count1: u64 = self.reader.read_varint()?;
+                        let bl1: u64 = self.reader.read_varint()?;
+                        let s1 = read_utf8_chars(&mut self.reader, char_count1)?;
+                        if s1.len() as u64 != bl1 {
+                            return Err(Error::StringLengthMismatch {
+                                expected: bl1,
+                                actual: s1.len() as u64,
+                            });
+                        }
+                        let char_count2: u64 = self.reader.read_varint()?;
+                        let bl2: u64 = self.reader.read_varint()?;
+                        let s2 = read_utf8_chars(&mut self.reader, char_count2)?;
+                        if s2.len() as u64 != bl2 {
+                            return Err(Error::StringLengthMismatch {
+                                expected: bl2,
+                                actual: s2.len() as u64,
+                            });
+                        }
+                        visitor.visit_string(format!("RTID({}@{})", s1, s2))
+                    }
+                }
+            }
+
+            RtonIdentifier::BinaryBlobCompact => {
+                let len: u64 = self.reader.read_varint()?;
+                let mut buf = vec![0u8; len as usize];
+                self.reader.read_exact(&mut buf)?;
+                visitor.visit_byte_buf(buf)
+            }
+
+            RtonIdentifier::BoolCompact => {
                 let b = self.reader.read_u8()?;
                 visitor.visit_bool(b != 0)
+            }
+
+            // Compact string tags — decode same as their non-compact counterparts.
+            RtonIdentifier::StrCompactAsciiDef => {
+                let len: u64 = self.reader.read_varint()?;
+                let s = read_ascii_string(&mut self.reader, len)?;
+                self.ref_table_90.push(s.clone());
+                visitor.visit_string(s)
+            }
+            RtonIdentifier::StrCompactAsciiRef => {
+                let idx: u64 = self.reader.read_varint()?;
+                let s = self
+                    .ref_table_90
+                    .get(idx as usize)
+                    .ok_or(Error::RefIndexOutOfBounds)?
+                    .clone();
+                visitor.visit_string(s)
+            }
+            RtonIdentifier::StrCompactUtf8Def => {
+                let char_count: u64 = self.reader.read_varint()?;
+                let byte_len: u64 = self.reader.read_varint()?;
+                let s = read_utf8_chars(&mut self.reader, char_count)?;
+                if s.len() as u64 != byte_len {
+                    return Err(Error::StringLengthMismatch {
+                        expected: byte_len,
+                        actual: s.len() as u64,
+                    });
+                }
+                self.ref_table_92.push(s.clone());
+                visitor.visit_string(s)
+            }
+            RtonIdentifier::StrCompactUtf8Ref => {
+                let idx: u64 = self.reader.read_varint()?;
+                let s = self
+                    .ref_table_92
+                    .get(idx as usize)
+                    .ok_or(Error::RefIndexOutOfBounds)?
+                    .clone();
+                visitor.visit_string(s)
+            }
+            // Paired compact variants — decode as their base counterparts.
+            //
+            // Hopper evidence (sub_1024e7b5c): 0xB4–0xB7 are selected when the
+            // compact transcoder tracks auxiliary offsets.  The string payload
+            // is identical to the base variant; the aux data is tracked
+            // out-of-band by the transcoder state.  For a generic decoder,
+            // treating them as their base counterparts is safe.
+            RtonIdentifier::StrCompactPair1 => {
+                // 0xB4 ≈ 0xB0 (StrCompactAsciiDef)
+                let len: u64 = self.reader.read_varint()?;
+                let s = read_ascii_string(&mut self.reader, len)?;
+                self.ref_table_90.push(s.clone());
+                visitor.visit_string(s)
+            }
+            RtonIdentifier::StrCompactPair2 => {
+                // 0xB5 ≈ 0xB1 (StrCompactAsciiRef)
+                let idx: u64 = self.reader.read_varint()?;
+                let s = self
+                    .ref_table_90
+                    .get(idx as usize)
+                    .ok_or(Error::RefIndexOutOfBounds)?
+                    .clone();
+                visitor.visit_string(s)
+            }
+            RtonIdentifier::StrCompactPair3 => {
+                // 0xB6 ≈ 0xB2 (StrCompactUtf8Def)
+                let char_count: u64 = self.reader.read_varint()?;
+                let byte_len: u64 = self.reader.read_varint()?;
+                let s = read_utf8_chars(&mut self.reader, char_count)?;
+                if s.len() as u64 != byte_len {
+                    return Err(Error::StringLengthMismatch {
+                        expected: byte_len,
+                        actual: s.len() as u64,
+                    });
+                }
+                self.ref_table_92.push(s.clone());
+                visitor.visit_string(s)
+            }
+            RtonIdentifier::StrCompactPair4 => {
+                // 0xB7 ≈ 0xB3 (StrCompactUtf8Ref)
+                let idx: u64 = self.reader.read_varint()?;
+                let s = self
+                    .ref_table_92
+                    .get(idx as usize)
+                    .ok_or(Error::RefIndexOutOfBounds)?
+                    .clone();
+                visitor.visit_string(s)
             }
             _ => Err(Error::UnknownTag(tag_byte)),
         }
@@ -410,8 +517,24 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
         deserialize_f32, deserialize_f64,
         deserialize_char, deserialize_str, deserialize_string,
         deserialize_bytes, deserialize_byte_buf,
-        deserialize_option, deserialize_unit, deserialize_seq, deserialize_map,
+        deserialize_unit, deserialize_seq, deserialize_map,
         deserialize_identifier, deserialize_ignored_any,
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'de>,
+    {
+        // PvZ2 represents JSON null as RtidZero (0x84).
+        // Peek at the next tag; if it's RtidZero, consume it and return None.
+        let pos = self.reader.stream_position().map_err(Error::Io)?;
+        let tag_byte = self.reader.read_u8().map_err(Error::Io)?;
+        if tag_byte == RtonIdentifier::RtidZero as u8 {
+            visitor.visit_none()
+        } else {
+            self.reader.seek(SeekFrom::Start(pos)).map_err(Error::Io)?;
+            visitor.visit_some(self)
+        }
     }
 
     fn deserialize_unit_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>

@@ -82,6 +82,7 @@ pub struct RtonSerializer<W> {
     is_root: bool,
     pending_varint: PendingVarInt,
     pending_rtid: bool,
+    pending_direct_str: bool,
 }
 
 impl<W: Write> RtonSerializer<W> {
@@ -95,6 +96,7 @@ impl<W: Write> RtonSerializer<W> {
             is_root: true,
             pending_varint: PendingVarInt::None,
             pending_rtid: false,
+            pending_direct_str: false,
         }
     }
 
@@ -121,39 +123,31 @@ impl<W: Write> RtonSerializer<W> {
         }
         Ok(())
     }
+
+    /// Write a string directly (tags 0x81/0x82) without interning.
+    /// This matches PvZ2's direct-string path (`arg3 == 0` in
+    /// `sub_1024e76bc` / `sub_1024e77cc`).
+    fn write_direct_string(&mut self, v: &str) -> Result<()> {
+        if v.is_ascii() {
+            self.writer.write_u8(RtonIdentifier::StrAsciiDirect as u8)?;
+            write_ascii_payload(&mut self.writer, v)?;
+        } else {
+            self.writer.write_u8(RtonIdentifier::StrUtf8Direct as u8)?;
+            write_utf8_payload(&mut self.writer, v)?;
+        }
+        Ok(())
+    }
 }
 
-/// Serializes the given data structure to a RTON byte vector, with optional encryption key.
-pub fn to_bytes<T: Serialize>(value: &T, key_seed: Option<&str>) -> Result<Vec<u8>> {
+/// Serializes the given data structure to a RTON byte vector.
+pub fn to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let mut data = Vec::new();
-    to_writer(&mut data, value, key_seed)?;
+    to_writer(&mut data, value)?;
     Ok(data)
 }
 
-/// Serializes the given data structure as RTON into the IO stream, with optional encryption key.
-pub fn to_writer<W: Write, T: Serialize>(
-    mut writer: W,
-    value: &T,
-    key_seed: Option<&str>,
-) -> Result<()> {
-    if let Some(key_str) = key_seed {
-        // Write Encrypted Header (u16 0x010 LE -> [0x10, 0x00])
-        writer.write_all(&[0x10, 0x00])?;
-
-        // Serialize content to buffer first
-        let mut buffer = Vec::new();
-        // Inner serialization writes standard RTON header + content + footer
-        // Recursively call to_writer with None key for inner unencrypted content
-        to_writer(&mut buffer, value, None)?;
-
-        // Encrypt buffer using shared crypto module
-        let encrypted = crate::crypto::encrypt_data(&buffer, Some(key_str))
-            .map_err(|e| Error::Message(format!("Encryption failed: {:?}", e)))?;
-
-        writer.write_all(&encrypted)?;
-        return Ok(());
-    }
-
+/// Serializes the given data structure as RTON into the IO stream.
+pub fn to_writer<W: Write, T: Serialize>(mut writer: W, value: &T) -> Result<()> {
     write_header(&mut writer)?;
 
     // Create serializer borrowing the writer
@@ -219,6 +213,12 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
                 self.pending_varint = PendingVarInt::None;
                 Ok(())
             }
+            "DirectStr" => {
+                self.pending_direct_str = true;
+                let result = value.serialize(&mut *self);
+                self.pending_direct_str = false;
+                result
+            }
             _ => value.serialize(self),
         }
     }
@@ -262,8 +262,17 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         if v == 0 {
             self.writer.write_u8(RtonIdentifier::UInt32Zero as u8)?;
         } else {
-            self.writer.write_u8(RtonIdentifier::UInt32 as u8)?;
-            self.writer.write_u32::<LittleEndian>(v)?;
+            let raw_len = varint_len_u32(v);
+            // Adaptive: use compact varint (0x28) when it saves space,
+            // otherwise fixed-width (0x26).  This matches PvZ2's dedicated
+            // unsigned writer (verified against ARM64 binary).
+            if raw_len >= 4 {
+                self.writer.write_u8(RtonIdentifier::UInt32 as u8)?;
+                self.writer.write_u32::<LittleEndian>(v)?;
+            } else {
+                self.writer.write_u8(RtonIdentifier::VarIntU32Alt as u8)?;
+                self.writer.write_varint(v)?;
+            }
         }
         Ok(())
     }
@@ -306,8 +315,17 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
         if v == 0 {
             self.writer.write_u8(RtonIdentifier::UInt64Zero as u8)?;
         } else {
-            self.writer.write_u8(RtonIdentifier::UInt64 as u8)?;
-            self.writer.write_u64::<LittleEndian>(v)?;
+            let raw_len = varint_len_u64(v);
+            // Adaptive: use compact varint (0x48) when it saves space,
+            // otherwise fixed-width (0x46).  Matches PvZ2's dedicated
+            // unsigned writer.
+            if raw_len >= 8 {
+                self.writer.write_u8(RtonIdentifier::UInt64 as u8)?;
+                self.writer.write_u64::<LittleEndian>(v)?;
+            } else {
+                self.writer.write_u8(RtonIdentifier::VarIntU64Alt as u8)?;
+                self.writer.write_varint(v)?;
+            }
         }
         Ok(())
     }
@@ -339,7 +357,11 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
             self.writer.write_u8(RtonIdentifier::RtidZero as u8)?;
             return Ok(());
         }
-        self.write_interned_string(v)
+        if self.pending_direct_str {
+            self.write_direct_string(v)
+        } else {
+            self.write_interned_string(v)
+        }
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
@@ -368,7 +390,10 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     }
 
     fn serialize_none(self) -> Result<()> {
-        self.writer.write_u8(RtonIdentifier::StrNull as u8)?;
+        // PvZ2 maps JSON null → RtidZero (0x84), not StrNull (0x02).
+        // Hopper: sub_1024ee170 (JSON null) → sub_1024e78dc (RTID writer)
+        // confirms that null RTID pointer → tag 0x84.
+        self.writer.write_u8(RtonIdentifier::RtidZero as u8)?;
         Ok(())
     }
     fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<()> {
@@ -433,9 +458,11 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
             return Ok(());
         }
 
-        // Downcast to f32. If their string representations are identical, serialize as f32.
+        // Downcast to f32 if the value can be exactly represented.
+        // Uses the round-trip check `(v as f32) as f64 == v` which is
+        // exact — it only succeeds when the f64 fits losslessly in f32.
         let v32 = v as f32;
-        if format!("{}", v) == format!("{}", v32) {
+        if (v32 as f64).to_bits() == v.to_bits() {
             return self.serialize_f32(v32);
         }
 
