@@ -21,7 +21,7 @@ impl FromStr for BinaryBlob {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // C# Format: $BINARY("HEX_STRING", RAW_LENGTH)
+        // Format: $BINARY("HEX_STRING", RAW_LENGTH)
         static BINARY_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
 
         // Regex matches: $BINARY("...", 123)
