@@ -45,12 +45,20 @@ pub enum RtonIdentifier {
 
     VarIntU32 = 0x24,
     VarIntI32 = 0x25,
+    /// Unsigned varint (adaptive in PvZ2's dedicated unsigned writer).
     VarIntU32Alt = 0x28,
+    /// Signed zigzag varint alt.  ⚠ Declared for completeness but **not
+    /// confirmed in PvZ2** — a full scan of 25,243 RTON samples found zero
+    /// structural uses.  The shared zigzag helpers (sub_1024e66c4 /
+    /// sub_1024e6720) are each only called from the 0x25 / 0x45 writers.
     VarIntI32Alt = 0x29,
 
     VarIntU64 = 0x44,
     VarIntI64 = 0x45,
+    /// Unsigned varint alt (adaptive in PvZ2's dedicated unsigned writer).
     VarIntU64Alt = 0x48,
+    /// Signed zigzag varint alt.  ⚠ **Not confirmed in PvZ2** — same
+    /// situation as VarIntI32Alt (0x29).
     VarIntI64Alt = 0x49,
 
     Float = 0x22,
@@ -79,19 +87,56 @@ pub enum RtonIdentifier {
 
     ObjectEnd = 0xff,
 
-    StrNativeX1 = 0xB0,
-    StrNativeX2 = 0xB1,
-    StrUnicodeX1 = 0xB2,
-    StrUnicodeX2 = 0xB3,
-    StrNativeOrUnicodeX1 = 0xB4,
-    StrNativeOrUnicodeX2 = 0xB5,
-    StrNativeOrUnicodeX3 = 0xB6,
-    StrNativeOrUnicodeX4 = 0xB7,
-    ObjectStartX1 = 0xB8,
-    ArrayStartX1 = 0xB9,
-    StrNativeX3 = 0xBA,
-    StrBinaryBlobX1 = 0xBB,
-    BoolX1 = 0xBC,
+    // ---- Compact-transcode tags (0xB0–0xBC) -----------------------------------
+    //
+    // PvZ2 emits these tags exclusively on the compact-transcode path
+    // (sub_1024e7b5c → sub_1024e7d18 → sub_1024eb604), triggered during
+    // resource/package loading (mResourceManager->Init → sub_1024e2b48).
+    // They are NOT used by the main JSON→RTON writer and do not appear in
+    // standard .rton distribution files — they are a runtime memory format.
+    /// Compact ASCII string definition (compact-path ≈ 0x90).
+    StrCompactAsciiDef = 0xB0,
+
+    /// Compact ASCII string reference (compact-path ≈ 0x91).
+    StrCompactAsciiRef = 0xB1,
+
+    /// Compact UTF-8 string definition (compact-path ≈ 0x92).
+    StrCompactUtf8Def = 0xB2,
+
+    /// Compact UTF-8 string reference (compact-path ≈ 0x93).
+    StrCompactUtf8Ref = 0xB3,
+
+    /// Paired compact variant 1 — selected when the transcoder tracks
+    /// auxiliary offsets.
+    StrCompactPair1 = 0xB4,
+
+    /// Paired compact variant 2.
+    StrCompactPair2 = 0xB5,
+
+    /// Paired compact variant 3.
+    StrCompactPair3 = 0xB6,
+
+    /// Paired compact variant 4.
+    StrCompactPair4 = 0xB7,
+
+    /// Compact object start (compact-path ≈ 0x85).
+    ObjectStartCompact = 0xB8,
+
+    /// Compact array start (compact-path ≈ 0x86).
+    ArrayStartCompact = 0xB9,
+
+    /// Compact RTID / RTID-zero.
+    ///
+    /// ⚠ Previously misnamed `StrNativeX3` (inherited from Sen's reference
+    /// implementation).  Hopper decompilation of sub_1024eb604 confirms
+    /// this tag encodes RTID values, not strings.
+    RtidCompact = 0xBA,
+
+    /// Compact binary blob (compact-path ≈ 0x87).
+    BinaryBlobCompact = 0xBB,
+
+    /// Bool with a payload byte (0 → false, non-zero → true).
+    BoolCompact = 0xBC,
 }
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
@@ -167,7 +212,7 @@ impl FromStr for Rtid {
             return Ok(Rtid::Null);
         }
 
-        // Case B: UID (Strict Lowercase Hex)
+        // Case B: UID (Strict Lowercase Hex) — standard .rton format
         static UID_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
         let uid_re = UID_REGEX
             .get_or_init(|| Regex::new(r"^([0-9a-f]+)\.([0-9a-f]+)\.([0-9a-f]+)@(.*)$"))
@@ -195,6 +240,81 @@ impl FromStr for Rtid {
                 id,
                 obj,
                 name,
+            });
+        }
+
+        // Case B2: Colon-prefixed UID (RtIdProtocol format, used in PvZ2
+        //          runtime protocol messages — not in .rton files).
+        //
+        // Hopper artifacts at 0x1029ee9b4–0x1029ee9f1 expose three
+        // printf-style format strings used by RtIdProtocol:
+        //   RTID(:%d.%d)            — id.group only (obj = 0, no name)
+        //   RTID(:%d.%d@%d)         — id.group@obj (decimal obj, no name)
+        //   RTID(:%d.%d.%08x@%s)   — id.group.obj@name (standard, hex obj)
+        //
+        // The leading ':' discriminates colon-format from standard hex format.
+
+        // :%d.%d.%08x@%s — most specific (decimal id, decimal group, hex obj, string name)
+        static COLON_UID_NAME_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+        let colon_uid_name_re = COLON_UID_NAME_REGEX
+            .get_or_init(|| Regex::new(r"^:(\d+)\.(\d+)\.([0-9a-f]+)@(.+)$"))
+            .as_ref()
+            .map_err(|e| Error::Regex(e.clone()))?;
+
+        if let Some(caps) = colon_uid_name_re.captures(inner) {
+            let id = caps.get(1).unwrap().as_str().parse::<u64>()?;
+            let group = caps.get(2).unwrap().as_str().parse::<u64>()?;
+            let obj = u32::from_str_radix(caps.get(3).unwrap().as_str(), 16)?;
+            let name = caps.get(4).unwrap().as_str();
+
+            return Ok(Rtid::Uid {
+                group,
+                id,
+                obj,
+                name: if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_string())
+                },
+            });
+        }
+
+        // :%d.%d@%d — decimal id, decimal group, decimal obj, no name
+        static COLON_UID_NO_NAME_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+        let colon_uid_no_name_re = COLON_UID_NO_NAME_REGEX
+            .get_or_init(|| Regex::new(r"^:(\d+)\.(\d+)@(\d+)$"))
+            .as_ref()
+            .map_err(|e| Error::Regex(e.clone()))?;
+
+        if let Some(caps) = colon_uid_no_name_re.captures(inner) {
+            let id = caps.get(1).unwrap().as_str().parse::<u64>()?;
+            let group = caps.get(2).unwrap().as_str().parse::<u64>()?;
+            let obj = caps.get(3).unwrap().as_str().parse::<u32>()?;
+
+            return Ok(Rtid::Uid {
+                group,
+                id,
+                obj,
+                name: None,
+            });
+        }
+
+        // :%d.%d — decimal id, decimal group, obj = 0, no name
+        static COLON_UID_SHORT_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+        let colon_uid_short_re = COLON_UID_SHORT_REGEX
+            .get_or_init(|| Regex::new(r"^:(\d+)\.(\d+)$"))
+            .as_ref()
+            .map_err(|e| Error::Regex(e.clone()))?;
+
+        if let Some(caps) = colon_uid_short_re.captures(inner) {
+            let id = caps.get(1).unwrap().as_str().parse::<u64>()?;
+            let group = caps.get(2).unwrap().as_str().parse::<u64>()?;
+
+            return Ok(Rtid::Uid {
+                group,
+                id,
+                obj: 0,
+                name: None,
             });
         }
 
@@ -412,32 +532,8 @@ impl Serialize for RtonValue {
                     v.serialize(serializer)
                 }
             }
-            RtonValue::Float(f) => {
-                if serializer.is_human_readable() && !f.is_finite() {
-                    if f.is_nan() {
-                        serializer.serialize_str("NaN")
-                    } else if *f == f32::INFINITY {
-                        serializer.serialize_str("Infinity")
-                    } else {
-                        serializer.serialize_str("-Infinity")
-                    }
-                } else {
-                    serializer.serialize_f32(*f)
-                }
-            }
-            RtonValue::Double(d) => {
-                if serializer.is_human_readable() && !d.is_finite() {
-                    if d.is_nan() {
-                        serializer.serialize_str("NaN")
-                    } else if *d == f64::INFINITY {
-                        serializer.serialize_str("Infinity")
-                    } else {
-                        serializer.serialize_str("-Infinity")
-                    }
-                } else {
-                    serializer.serialize_f64(*d)
-                }
-            }
+            RtonValue::Float(f) => serializer.serialize_f32(*f),
+            RtonValue::Double(d) => serializer.serialize_f64(*d),
             RtonValue::String(s) => serializer.serialize_str(s),
             RtonValue::Binary(b) => {
                 if serializer.is_human_readable() {
@@ -519,20 +615,16 @@ impl<'de> Deserialize<'de> for RtonValue {
             where
                 E: de::Error,
             {
-                match value {
-                    "NaN" => return Ok(RtonValue::Double(f64::NAN)),
-                    "Infinity" | "+Infinity" => return Ok(RtonValue::Double(f64::INFINITY)),
-                    "-Infinity" => return Ok(RtonValue::Double(f64::NEG_INFINITY)),
-                    _ => {}
-                }
                 if value.starts_with("$BINARY(\"")
-                    && let Ok(blob) = BinaryBlob::from_str(value) {
-                        return Ok(RtonValue::Binary(blob));
-                    }
+                    && let Ok(blob) = BinaryBlob::from_str(value)
+                {
+                    return Ok(RtonValue::Binary(blob));
+                }
                 if value.starts_with("RTID(")
-                    && let Ok(rtid) = Rtid::from_str(value) {
-                        return Ok(RtonValue::Rtid(rtid));
-                    }
+                    && let Ok(rtid) = Rtid::from_str(value)
+                {
+                    return Ok(RtonValue::Rtid(rtid));
+                }
                 Ok(RtonValue::String(value.to_owned()))
             }
             fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
