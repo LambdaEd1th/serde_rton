@@ -11,8 +11,8 @@ RTON is a binary data format commonly used in PopCap framework games (e.g., *Pla
     * Supports specific integer widths (`i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`) to preserve the exact binary layout.
     * Distinguishes between Fixed-width integers and Variable-length integers (VarInts).
 * **RTON Specific Optimizations**:
-    * **Zero-Value Optimization**: Automatically uses dedicated zero-tags (e.g., `Int32Zero`) to save space.
-    * **String Interning**: Handles reference counting for strings (`StrAsciiRef`, `StrUtf8Ref`).
+    * **Zero-Value Optimization**: Automatically uses dedicated zero-tags (e.g., `I32Zero`) to save space.
+    * **String Interning**: Handles reference counting for strings (`String8Reference`, `StringUtf8Reference`).
     * **Native RTID Support**: Parses and serializes Resource Type IDs (`0x83`).
     * **Order Preservation**: Object keys are maintained in their insertion order (critical for binary game data stability).
 * **Zero-Copy Deserialization**: Capable of borrowing string slices where possible.
@@ -97,7 +97,9 @@ fn main() -> serde_rton::Result<()> {
 
 ### 3. Converting to JSON/YAML
 
-You can use `serde_json` or `serde_yaml` to convert RTON data for debugging.
+Use standard Serde formats such as `serde_json` or `serde_yaml` directly when
+you want text output for debugging. This crate intentionally does not expose a
+separate PvZ2-specific JSON bridge.
 
 > **⚠️ Note on `u64`**: RTON supports full 64-bit unsigned integers. Standard JSON parsers (like in JavaScript) may lose precision for numbers larger than `2^53 - 1` (`Number.MAX_SAFE_INTEGER`). This library serializes `u64` as native numbers. If you need safe JSON interop for huge IDs, consider wrapping them or post-processing.
 
@@ -146,14 +148,14 @@ fn main() -> Result<()> {
 
 | RTON Identifier | Rust Type | Notes |
 | --- | --- | --- |
-| `BoolTrue` / `BoolFalse` | `bool` |  |
-| `Int8` / `UInt8` | `i8` / `u8` |  |
-| `Int16` / `UInt16` | `i16` / `u16` |  |
-| `Int32` / `UInt32` | `i32` / `u32` |  |
-| `Int64` / `UInt64` | `i64` / `u64` | Native serialization (8 bytes) |
+| `BooleanTrue` / `BooleanFalse` | `bool` |  |
+| `I8` / `U8` | `i8` / `u8` |  |
+| `I16` / `U16` | `i16` / `u16` |  |
+| `I32` / `U32` | `i32` / `u32` |  |
+| `I64` / `U64` | `i64` / `u64` | Native serialization (8 bytes) |
 | `VarInt` | `i64` / `u64` | Variable-length encoding (LEB128/ZigZag) |
-| `Float` | `f32` |  |
-| `Double` | `f64` |  |
+| `F32` | `f32` |  |
+| `F64` | `f64` |  |
 | `String` | `String` | Supports ASCII and UTF-8 interning |
 | `BinaryBlob` (0x87) | `Vec<u8>` | Raw byte arrays |
 | `RTID` (0x83) | `String` | Formats: `RTID(uid@path)`, `RTID(str@str)`, `RTID(0)` |
@@ -163,14 +165,13 @@ fn main() -> Result<()> {
 ## 🛠 Project Structure
 
 * **`src/lib.rs`**: Library entry point and re-exports.
-* **`src/constants.rs`**: Definitions for File Headers, Footers, Versions, and the `RtonIdentifier` enum (Tags).
-* **`src/value.rs`**: The `RtonValue` enum acting as the AST.
+* **`src/types.rs`**: File markers, `RtonTag` / `RtidPayloadTag`, `RtonValue`, and RTID types.
 * **`src/ser.rs`**: Implementation of `serde::Serializer`.
 * **`src/de.rs`**: Implementation of `serde::Deserializer`.
 * **`src/error.rs`**: Custom error types (`serde_rton::Error`).
 * **`src/binary.rs`**: Binary read/write helper utilities.
-* **`src/rtid.rs`**: RTID (Resource Type ID) parsing and serialization.
-* **`src/varint.rs`**: Variable-length integer encoding/decoding.
+* **`src/varint.rs`**: VarInt encoding and direct-string serialization helpers.
+* **`src/crypto.rs`**: Rijndael-192-CBC helpers for encrypted RTON files.
 
 ## 🧪 Testing
 

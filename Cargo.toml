@@ -1,6 +1,6 @@
 [package]
 name = "serde_rton"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["ed1th"]
 categories = ["encoding", "parser-implementations"]
@@ -18,8 +18,6 @@ integer-encoding = "4.1"
 simple-rijndael = "0.3"
 md-5 = "0.11"
 hex = "0.4"
-
-serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 serde_yaml = "0.9"

@@ -59,8 +59,9 @@ impl Serialize for VarInt<u64> {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use rton::DirectStr;
+/// ```
+/// use serde::Serialize;
+/// use serde_rton::DirectStr;
 ///
 /// #[derive(Serialize)]
 /// struct MyData {

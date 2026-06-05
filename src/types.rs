@@ -15,73 +15,70 @@ use std::sync::OnceLock;
 pub const FILE_HEADER: &[u8] = b"RTON";
 pub const FILE_FOOTER: &[u8] = b"DONE";
 pub const FILE_VERSION: u32 = 1;
+pub const COMPACT_FILE_VERSION: u32 = 0x0001_0001;
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
-pub enum RtonIdentifier {
-    BoolFalse = 0x00,
-    BoolTrue = 0x01,
-    StrNull = 0x02,
+pub enum RtonTag {
+    BooleanFalse = 0x00,
+    BooleanTrue = 0x01,
+    StringAsterisk = 0x02,
 
-    Int8 = 0x08,
-    Int8Zero = 0x09,
-    UInt8 = 0x0a,
-    UIntZero = 0x0b,
+    I8 = 0x08,
+    I8Zero = 0x09,
+    U8 = 0x0a,
+    U8Zero = 0x0b,
 
-    Int16 = 0x10,
-    Int16Zero = 0x11,
-    UInt16 = 0x12,
-    UInt16Zero = 0x13,
+    I16 = 0x10,
+    I16Zero = 0x11,
+    U16 = 0x12,
+    U16Zero = 0x13,
 
-    Int32 = 0x20,
-    Int32Zero = 0x21,
-    UInt32 = 0x26,
-    UInt32Zero = 0x27,
+    I32 = 0x20,
+    I32Zero = 0x21,
+    U32 = 0x26,
+    U32Zero = 0x27,
 
-    Int64 = 0x40,
-    Int64Zero = 0x41,
-    UInt64 = 0x46,
-    UInt64Zero = 0x47,
+    I64 = 0x40,
+    I64Zero = 0x41,
+    U64 = 0x46,
+    U64Zero = 0x47,
 
-    VarIntU32 = 0x24,
-    VarIntI32 = 0x25,
+    RawVarInt32 = 0x24,
+    ZigZagVarInt32 = 0x25,
     /// Unsigned varint (adaptive in PvZ2's dedicated unsigned writer).
-    VarIntU32Alt = 0x28,
-    /// Signed zigzag varint alt.  ⚠ Declared for completeness but **not
-    /// confirmed in PvZ2** — a full scan of 25,243 RTON samples found zero
-    /// structural uses.  The shared zigzag helpers (sub_1024e66c4 /
-    /// sub_1024e6720) are each only called from the 0x25 / 0x45 writers.
-    VarIntI32Alt = 0x29,
+    UnsignedVarInt32 = 0x28,
+    /// Deprecated signed zigzag varint alt from older RTON variants.
+    DeprecatedZigZagVarInt32 = 0x29,
 
-    VarIntU64 = 0x44,
-    VarIntI64 = 0x45,
+    RawVarInt64 = 0x44,
+    ZigZagVarInt64 = 0x45,
     /// Unsigned varint alt (adaptive in PvZ2's dedicated unsigned writer).
-    VarIntU64Alt = 0x48,
-    /// Signed zigzag varint alt.  ⚠ **Not confirmed in PvZ2** — same
-    /// situation as VarIntI32Alt (0x29).
-    VarIntI64Alt = 0x49,
+    UnsignedVarInt64 = 0x48,
+    /// Deprecated signed zigzag varint alt from older RTON variants.
+    DeprecatedZigZagVarInt64 = 0x49,
 
-    Float = 0x22,
-    FloatZero = 0x23,
-    Double = 0x42,
-    DoubleZero = 0x43,
+    F32 = 0x22,
+    F32Zero = 0x23,
+    F64 = 0x42,
+    F64Zero = 0x43,
 
-    StrAsciiDirect = 0x81,
-    StrUtf8Direct = 0x82,
-    StrAsciiDef = 0x90,
-    StrAsciiRef = 0x91,
-    StrUtf8Def = 0x92,
-    StrUtf8Ref = 0x93,
+    String8Direct = 0x81,
+    StringUtf8Direct = 0x82,
+    String8Definition = 0x90,
+    String8Reference = 0x91,
+    StringUtf8Definition = 0x92,
+    StringUtf8Reference = 0x93,
 
     BinaryBlob = 0x87,
 
     Rtid = 0x83,
-    RtidZero = 0x84,
+    RtidNull = 0x84,
 
-    ObjectStart = 0x85,
-    ArrayStart = 0x86,
+    ObjectBegin = 0x85,
+    ArrayBegin = 0x86,
 
-    ArrayCapacity = 0xfd,
+    ArrayLength = 0xfd,
 
     ArrayEnd = 0xfe,
 
@@ -94,58 +91,81 @@ pub enum RtonIdentifier {
     // resource/package loading (mResourceManager->Init → sub_1024e2b48).
     // They are NOT used by the main JSON→RTON writer and do not appear in
     // standard .rton distribution files — they are a runtime memory format.
-    /// Compact ASCII string definition (compact-path ≈ 0x90).
-    StrCompactAsciiDef = 0xB0,
+    /// Compact 8-bit string definition.
+    ///
+    /// Payload: `u32 byte_len_including_nul`, then ASCII bytes including the
+    /// trailing NUL.  References point at the absolute output offset of this
+    /// byte payload.
+    CompactString8Definition = 0xB0,
 
-    /// Compact ASCII string reference (compact-path ≈ 0x91).
-    StrCompactAsciiRef = 0xB1,
+    /// Compact 8-bit string reference.
+    ///
+    /// Payload: `u32 payload_offset`.
+    CompactString8Reference = 0xB1,
 
-    /// Compact UTF-8 string definition (compact-path ≈ 0x92).
-    StrCompactUtf8Def = 0xB2,
+    /// Compact UTF-32 string definition.
+    ///
+    /// Despite the historical name, the compact payload is UTF-32LE-ish:
+    /// `u32 byte_len` followed by 32-bit codepoints including a trailing zero.
+    CompactUtf32StringDefinition = 0xB2,
 
-    /// Compact UTF-8 string reference (compact-path ≈ 0x93).
-    StrCompactUtf8Ref = 0xB3,
+    /// Compact UTF-32 string reference.
+    ///
+    /// Payload: `u32 payload_offset`.
+    CompactUtf32StringReference = 0xB3,
 
-    /// Paired compact variant 1 — selected when the transcoder tracks
-    /// auxiliary offsets.
-    StrCompactPair1 = 0xB4,
+    /// Compact 8-bit string definition with value-end offset tracking.
+    ///
+    /// Payload is B0 plus an extra trailing `u32`.
+    CompactString8DefinitionWithValueOffset = 0xB4,
 
-    /// Paired compact variant 2.
-    StrCompactPair2 = 0xB5,
+    /// Compact 8-bit string reference with value-end offset tracking.
+    ///
+    /// Payload is B1 plus an extra trailing `u32`.
+    CompactString8ReferenceWithValueOffset = 0xB5,
 
-    /// Paired compact variant 3.
-    StrCompactPair3 = 0xB6,
+    /// Compact UTF-32 string definition with value-end offset tracking.
+    ///
+    /// Payload is B2 plus an extra trailing `u32`.
+    CompactUtf32StringDefinitionWithValueOffset = 0xB6,
 
-    /// Paired compact variant 4.
-    StrCompactPair4 = 0xB7,
+    /// Compact UTF-32 string reference with value-end offset tracking.
+    ///
+    /// Payload is B3 plus an extra trailing `u32`.
+    CompactUtf32StringReferenceWithValueOffset = 0xB7,
 
     /// Compact object start (compact-path ≈ 0x85).
-    ObjectStartCompact = 0xB8,
+    CompactObjectBegin = 0xB8,
 
-    /// Compact array start (compact-path ≈ 0x86).
-    ArrayStartCompact = 0xB9,
+    /// Compact array start.
+    ///
+    /// Payload: `0xFD`, `u32 count`, `u32[count + 1]` element-offset table,
+    /// then exactly `count` elements.  There is no trailing 0xFE marker.
+    CompactArrayBegin = 0xB9,
 
     /// Compact RTID / RTID-zero.
     ///
     /// ⚠ Previously misnamed `StrNativeX3` (inherited from Sen's reference
     /// implementation).  Hopper decompilation of sub_1024eb604 confirms
     /// this tag encodes RTID values, not strings.
-    RtidCompact = 0xBA,
+    CompactRtid = 0xBA,
 
-    /// Compact binary blob (compact-path ≈ 0x87).
-    BinaryBlobCompact = 0xBB,
+    /// Compact binary blob.
+    ///
+    /// Payload: a compact ASCII hex string (B0/B1/B4/B5), then `u32 raw_len`.
+    CompactBinaryBlob = 0xBB,
 
     /// Bool with a payload byte (0 → false, non-zero → true).
-    BoolCompact = 0xBC,
+    CompactBoolean = 0xBC,
 }
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
-pub enum RtidIdentifier {
-    Zero = 0x00,
-    UidNoString = 0x01,
-    Uid = 0x02,
-    String = 0x03,
+pub enum RtidPayloadTag {
+    Null = 0x00,
+    UidWithoutName = 0x01,
+    UidWithName = 0x02,
+    RawString = 0x03,
 }
 
 // ================= RTID =================
@@ -165,6 +185,114 @@ pub enum Rtid {
         name: String,
         parent: String,
     },
+}
+
+impl Rtid {
+    pub fn to_runtime_string(&self) -> String {
+        match self {
+            Rtid::Null => "RTID(0)".to_string(),
+            Rtid::Uid {
+                group,
+                id,
+                obj,
+                name,
+            } => match name {
+                Some(name) => format!("RTID({id}.{group}.{obj:08x}@{name})"),
+                None if *obj == 0 => format!("RTID(:{id}.{group})"),
+                None => format!("RTID(:{id}.{group}@{obj})"),
+            },
+            Rtid::Raw { name, parent } => format!("RTID({name}@{parent})"),
+        }
+    }
+
+    pub fn from_runtime_str(s: &str) -> Result<Self, Error> {
+        static OUTER_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+        let outer_re = OUTER_REGEX
+            .get_or_init(|| Regex::new(r"^RTID\((.*)\)$"))
+            .as_ref()
+            .map_err(|e| Error::Regex(e.clone()))?;
+
+        let caps = outer_re
+            .captures(s)
+            .ok_or_else(|| Error::InvalidRtid("Not an RTID string".into()))?;
+        let inner = caps
+            .get(1)
+            .ok_or_else(|| Error::InvalidRtid("Empty content".into()))?
+            .as_str();
+
+        if inner == "0" {
+            return Ok(Rtid::Null);
+        }
+
+        static RUNTIME_UID_NAME_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+        let runtime_uid_name_re = RUNTIME_UID_NAME_REGEX
+            .get_or_init(|| Regex::new(r"^(\d+)\.(\d+)\.([0-9a-fA-F]+)@(.*)$"))
+            .as_ref()
+            .map_err(|e| Error::Regex(e.clone()))?;
+
+        if let Some(caps) = runtime_uid_name_re.captures(inner) {
+            let id = caps.get(1).unwrap().as_str().parse::<u64>()?;
+            let group = caps.get(2).unwrap().as_str().parse::<u64>()?;
+            let obj = u32::from_str_radix(caps.get(3).unwrap().as_str(), 16)?;
+            let name = caps.get(4).unwrap().as_str();
+
+            return Ok(Rtid::Uid {
+                group,
+                id,
+                obj,
+                name: if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_string())
+                },
+            });
+        }
+
+        static RUNTIME_UID_NO_NAME_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+        let runtime_uid_no_name_re = RUNTIME_UID_NO_NAME_REGEX
+            .get_or_init(|| Regex::new(r"^:(\d+)\.(\d+)@(\d+)$"))
+            .as_ref()
+            .map_err(|e| Error::Regex(e.clone()))?;
+
+        if let Some(caps) = runtime_uid_no_name_re.captures(inner) {
+            return Ok(Rtid::Uid {
+                id: caps.get(1).unwrap().as_str().parse::<u64>()?,
+                group: caps.get(2).unwrap().as_str().parse::<u64>()?,
+                obj: caps.get(3).unwrap().as_str().parse::<u32>()?,
+                name: None,
+            });
+        }
+
+        static RUNTIME_UID_SHORT_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+        let runtime_uid_short_re = RUNTIME_UID_SHORT_REGEX
+            .get_or_init(|| Regex::new(r"^:(\d+)\.(\d+)$"))
+            .as_ref()
+            .map_err(|e| Error::Regex(e.clone()))?;
+
+        if let Some(caps) = runtime_uid_short_re.captures(inner) {
+            return Ok(Rtid::Uid {
+                id: caps.get(1).unwrap().as_str().parse::<u64>()?,
+                group: caps.get(2).unwrap().as_str().parse::<u64>()?,
+                obj: 0,
+                name: None,
+            });
+        }
+
+        static RAW_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+        let raw_re = RAW_REGEX
+            .get_or_init(|| Regex::new(r"^([^@]+)@([^@]*)$"))
+            .as_ref()
+            .map_err(|e| Error::Regex(e.clone()))?;
+
+        if let Some(caps) = raw_re.captures(inner) {
+            return Ok(Rtid::Raw {
+                name: caps.get(1).unwrap().as_str().to_string(),
+                parent: caps.get(2).unwrap().as_str().to_string(),
+            });
+        }
+
+        Err(Error::InvalidRtid("Inner structure mismatch".into()))
+    }
 }
 
 impl fmt::Display for Rtid {
@@ -246,13 +374,17 @@ impl FromStr for Rtid {
         // Case B2: Colon-prefixed UID (RtIdProtocol format, used in PvZ2
         //          runtime protocol messages — not in .rton files).
         //
-        // Hopper artifacts at 0x1029ee9b4–0x1029ee9f1 expose three
-        // printf-style format strings used by RtIdProtocol:
+        // Hopper artifacts at 0x1029ee9b4–0x1029ee9f1 expose printf-style
+        // format strings used by RtIdProtocol:
         //   RTID(:%d.%d)            — id.group only (obj = 0, no name)
         //   RTID(:%d.%d@%d)         — id.group@obj (decimal obj, no name)
-        //   RTID(:%d.%d.%08x@%s)   — id.group.obj@name (standard, hex obj)
+        //   RTID(%d.%d.%08x@%s)    — id.group.obj@name (decimal id/group,
+        //                              hex obj, no leading colon)
         //
-        // The leading ':' discriminates colon-format from standard hex format.
+        // The full no-colon runtime form is ambiguous with standard .rton hex
+        // strings when id/group contain only decimal digits.  Keep no-colon
+        // parsing as standard hex to preserve Display/FromStr round-trips, and
+        // accept the colon-prefixed full form below as an explicit extension.
 
         // :%d.%d.%08x@%s — most specific (decimal id, decimal group, hex obj, string name)
         static COLON_UID_NAME_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
@@ -615,11 +747,6 @@ impl<'de> Deserialize<'de> for RtonValue {
             where
                 E: de::Error,
             {
-                if value.starts_with("$BINARY(\"")
-                    && let Ok(blob) = BinaryBlob::from_str(value)
-                {
-                    return Ok(RtonValue::Binary(blob));
-                }
                 if value.starts_with("RTID(")
                     && let Ok(rtid) = Rtid::from_str(value)
                 {
@@ -646,7 +773,7 @@ impl<'de> Deserialize<'de> for RtonValue {
                 Ok(RtonValue::Binary(BinaryBlob(v)))
             }
             fn visit_none<E>(self) -> Result<Self::Value, E> {
-                Ok(RtonValue::Null)
+                Ok(RtonValue::Rtid(Rtid::Null))
             }
             fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
             where
