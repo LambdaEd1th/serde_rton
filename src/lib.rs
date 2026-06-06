@@ -83,6 +83,7 @@ pub use tags::{RtidPayloadTag, RtonTag};
 pub use value::Value;
 pub use varint::{DirectStr, VarInt};
 
+pub use crypto::{decrypt_data, encrypt_data};
 pub use de::{Deserializer, from_bytes, from_reader};
 pub use ser::{Serializer, to_bytes, to_compact_bytes, to_compact_writer, to_writer};
 
