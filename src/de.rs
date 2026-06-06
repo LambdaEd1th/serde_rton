@@ -1,3 +1,9 @@
+//! RTON deserialization.
+//!
+//! The primary entry points are [`from_bytes`] and [`from_reader`]. They accept
+//! standard RTON files and the PvZ2 compact runtime variant when the file header
+//! uses the compact version marker.
+
 use byteorder::{LittleEndian, ReadBytesExt};
 use integer_encoding::VarIntReader;
 use serde::de::{self, DeserializeOwned};
@@ -5,26 +11,35 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{Error, Result};
-use crate::types::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtidPayloadTag, RtonTag};
+use crate::tags::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtidPayloadTag, RtonTag};
 
-pub struct RtonDeserializer<'de, R> {
+/// Serde deserializer for RTON streams.
+///
+/// Most callers should use [`from_bytes`] or [`from_reader`] instead of
+/// constructing this type directly. Direct construction expects the caller to
+/// handle the file header and footer themselves.
+pub struct Deserializer<'de, R> {
     reader: R,
-    ref_table_90: Vec<String>,
-    ref_table_92: Vec<String>,
-    compact_ascii_refs: HashMap<u32, String>,
-    compact_utf32_refs: HashMap<u32, String>,
+    standard_latin1_strings_by_index: Vec<String>,
+    standard_utf8_strings_by_index: Vec<String>,
+    compact_latin1_strings_by_offset: HashMap<u32, String>,
+    compact_utf32_strings_by_offset: HashMap<u32, String>,
     is_root: bool,
     phantom: std::marker::PhantomData<&'de ()>,
 }
 
-impl<'de, R: Read> RtonDeserializer<'de, R> {
+impl<'de, R: Read> Deserializer<'de, R> {
+    /// Creates a deserializer over an already-positioned reader.
+    ///
+    /// This does not consume or validate the `RTON` file header. Use
+    /// [`from_reader`] for whole-file deserialization.
     pub fn new(reader: R) -> Self {
-        RtonDeserializer {
+        Deserializer {
             reader,
-            ref_table_90: Vec::new(),
-            ref_table_92: Vec::new(),
-            compact_ascii_refs: HashMap::new(),
-            compact_utf32_refs: HashMap::new(),
+            standard_latin1_strings_by_index: Vec::new(),
+            standard_utf8_strings_by_index: Vec::new(),
+            compact_latin1_strings_by_offset: HashMap::new(),
+            compact_utf32_strings_by_offset: HashMap::new(),
             is_root: true,
             phantom: std::marker::PhantomData,
         }
@@ -37,15 +52,18 @@ macro_rules! read_primitive {
     };
 }
 
-// Helper: read a PvZ2 8-bit string by byte length.
-fn read_8bit_string<R: Read>(reader: &mut R, len: u64) -> Result<String> {
-    let mut buf = vec![0u8; len as usize];
+fn read_latin1_chars_by_count<R: Read>(reader: &mut R, count: u64) -> Result<String> {
+    let mut buf = vec![0u8; count as usize];
     reader.read_exact(&mut buf)?;
     Ok(buf.into_iter().map(char::from).collect())
 }
 
-// Helper: Read exactly `count` UTF-8 characters from stream
-fn read_utf8_chars<R: Read>(reader: &mut R, count: u64) -> Result<String> {
+fn read_latin1_string_payload<R: Read>(reader: &mut R) -> Result<String> {
+    let char_count: u64 = reader.read_varint()?;
+    read_latin1_chars_by_count(reader, char_count)
+}
+
+fn read_utf8_chars_by_count<R: Read>(reader: &mut R, count: u64) -> Result<String> {
     let mut s = String::new();
     for _ in 0..count {
         let mut first_byte = [0u8; 1];
@@ -74,6 +92,12 @@ fn read_utf8_chars<R: Read>(reader: &mut R, count: u64) -> Result<String> {
         s.push_str(&ch);
     }
     Ok(s)
+}
+
+fn read_utf8_string_payload<R: Read>(reader: &mut R) -> Result<String> {
+    let char_count: u64 = reader.read_varint()?;
+    let _byte_len: u64 = reader.read_varint()?;
+    read_utf8_chars_by_count(reader, char_count)
 }
 
 fn decode_hex_bytes(hex_str: &str) -> Result<Vec<u8>> {
@@ -146,22 +170,29 @@ fn validate_footer<R: Read>(reader: &mut R) -> Result<()> {
     Ok(())
 }
 
-/// Deserializes a RTON byte slice into a type.
+/// Deserializes a complete RTON byte slice into `T`.
+///
+/// The input must include the file header and `DONE` footer. Trailing bytes
+/// after the footer are ignored, matching the lenient PvZ2 reader behavior.
 pub fn from_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     from_reader(std::io::Cursor::new(bytes))
 }
 
-/// Deserializes an IO stream into a type.
+/// Deserializes a complete RTON stream into `T`.
+///
+/// The reader must implement both [`Read`] and [`Seek`] because some compact
+/// payloads are offset-addressed and because header validation may rewind one
+/// byte after probing the root tag.
 pub fn from_reader<R: Read + Seek, T: DeserializeOwned>(mut reader: R) -> Result<T> {
     validate_header(&mut reader)?;
 
-    let mut deserializer = RtonDeserializer::new(reader);
+    let mut deserializer = Deserializer::new(reader);
     let value = T::deserialize(&mut deserializer)?;
     validate_footer(&mut deserializer.reader)?;
     Ok(value)
 }
 
-impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
+impl<'de, R: Read + Seek> Deserializer<'de, R> {
     fn read_rtid_string(&mut self) -> Result<String> {
         let sub_id_byte = self.reader.read_u8()?;
         let sub_id = RtidPayloadTag::try_from(sub_id_byte)
@@ -176,15 +207,7 @@ impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
                 Ok(format!("RTID({:x}.{:x}.{:08x}@)", v1, v2, x))
             }
             RtidPayloadTag::UidWithName => {
-                let char_count: u64 = self.reader.read_varint()?;
-                let byte_len: u64 = self.reader.read_varint()?;
-                let name = read_utf8_chars(&mut self.reader, char_count)?;
-                if name.len() as u64 != byte_len {
-                    return Err(Error::StringLengthMismatch {
-                        expected: byte_len,
-                        actual: name.len() as u64,
-                    });
-                }
+                let name = read_utf8_string_payload(&mut self.reader)?;
 
                 let v2: u64 = self.reader.read_varint()?;
                 let v1: u64 = self.reader.read_varint()?;
@@ -192,32 +215,16 @@ impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
                 Ok(format!("RTID({:x}.{:x}.{:08x}@{})", v1, v2, x, name))
             }
             RtidPayloadTag::RawString => {
-                let char_count1: u64 = self.reader.read_varint()?;
-                let bl1: u64 = self.reader.read_varint()?;
-                let s1 = read_utf8_chars(&mut self.reader, char_count1)?;
-                if s1.len() as u64 != bl1 {
-                    return Err(Error::StringLengthMismatch {
-                        expected: bl1,
-                        actual: s1.len() as u64,
-                    });
-                }
+                let s1 = read_utf8_string_payload(&mut self.reader)?;
 
-                let char_count2: u64 = self.reader.read_varint()?;
-                let bl2: u64 = self.reader.read_varint()?;
-                let s2 = read_utf8_chars(&mut self.reader, char_count2)?;
-                if s2.len() as u64 != bl2 {
-                    return Err(Error::StringLengthMismatch {
-                        expected: bl2,
-                        actual: s2.len() as u64,
-                    });
-                }
+                let s2 = read_utf8_string_payload(&mut self.reader)?;
 
                 Ok(format!("RTID({}@{})", s1, s2))
             }
         }
     }
 
-    fn read_compact_ascii_def(&mut self, paired: bool) -> Result<String> {
+    fn read_compact_latin1_string_definition(&mut self, paired: bool) -> Result<String> {
         let len = self.reader.read_u32::<LittleEndian>()?;
         let data_offset = u32::try_from(self.reader.stream_position()?)
             .map_err(|_| Error::Message("Compact string offset exceeds u32".into()))?;
@@ -229,7 +236,8 @@ impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
         }
 
         let s = buf.into_iter().map(char::from).collect::<String>();
-        self.compact_ascii_refs.insert(data_offset, s.clone());
+        self.compact_latin1_strings_by_offset
+            .insert(data_offset, s.clone());
 
         if paired {
             let _aux_offset = self.reader.read_u32::<LittleEndian>()?;
@@ -238,10 +246,10 @@ impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
         Ok(s)
     }
 
-    fn read_compact_ascii_ref(&mut self, paired: bool) -> Result<String> {
+    fn read_compact_latin1_string_reference(&mut self, paired: bool) -> Result<String> {
         let offset = self.reader.read_u32::<LittleEndian>()?;
         let s = self
-            .compact_ascii_refs
+            .compact_latin1_strings_by_offset
             .get(&offset)
             .ok_or(Error::RefIndexOutOfBounds)?
             .clone();
@@ -253,7 +261,7 @@ impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
         Ok(s)
     }
 
-    fn read_compact_utf32_def(&mut self, paired: bool) -> Result<String> {
+    fn read_compact_utf32_string_definition(&mut self, paired: bool) -> Result<String> {
         let byte_len = self.reader.read_u32::<LittleEndian>()?;
         if byte_len % 4 != 0 {
             return Err(Error::StringLengthMismatch {
@@ -282,7 +290,8 @@ impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
             s.push(ch);
         }
 
-        self.compact_utf32_refs.insert(data_offset, s.clone());
+        self.compact_utf32_strings_by_offset
+            .insert(data_offset, s.clone());
 
         if paired {
             let _aux_offset = self.reader.read_u32::<LittleEndian>()?;
@@ -291,10 +300,10 @@ impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
         Ok(s)
     }
 
-    fn read_compact_utf32_ref(&mut self, paired: bool) -> Result<String> {
+    fn read_compact_utf32_string_reference(&mut self, paired: bool) -> Result<String> {
         let offset = self.reader.read_u32::<LittleEndian>()?;
         let s = self
-            .compact_utf32_refs
+            .compact_utf32_strings_by_offset
             .get(&offset)
             .ok_or(Error::RefIndexOutOfBounds)?
             .clone();
@@ -309,11 +318,11 @@ impl<'de, R: Read + Seek> RtonDeserializer<'de, R> {
     fn read_compact_binary_blob_hex_string(&mut self) -> Result<Option<String>> {
         let tag_byte = self.reader.read_u8().map_err(Error::Io)?;
         match tag_byte {
-            tag if tag == RtonTag::CompactString8Definition as u8 => {
-                self.read_compact_ascii_def(false).map(Some)
+            tag if tag == RtonTag::CompactLatin1StringDefinition as u8 => {
+                self.read_compact_latin1_string_definition(false).map(Some)
             }
-            tag if tag == RtonTag::CompactString8Reference as u8 => {
-                self.read_compact_ascii_ref(false).map(Some)
+            tag if tag == RtonTag::CompactLatin1StringReference as u8 => {
+                self.read_compact_latin1_string_reference(false).map(Some)
             }
             _ => Ok(None),
         }
@@ -334,7 +343,7 @@ macro_rules! forward_to_deserialize_any {
     };
 }
 
-impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R> {
+impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut Deserializer<'de, R> {
     type Error = Error;
     fn is_human_readable(&self) -> bool {
         false
@@ -400,9 +409,11 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             RtonTag::UnsignedVarInt64 => visitor.visit_u64(self.reader.read_varint::<u64>()?),
             RtonTag::ZigZagVarInt32 => visitor.visit_i32(self.reader.read_varint::<i32>()?),
             RtonTag::ZigZagVarInt64 => visitor.visit_i64(self.reader.read_varint::<i64>()?),
+            #[allow(deprecated)]
             RtonTag::DeprecatedZigZagVarInt32 => {
                 visitor.visit_i32(self.reader.read_varint::<i32>()?)
             }
+            #[allow(deprecated)]
             RtonTag::DeprecatedZigZagVarInt64 => {
                 visitor.visit_i64(self.reader.read_varint::<i64>()?)
             }
@@ -412,20 +423,18 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             RtonTag::F64 => visitor.visit_f64(read_primitive!(self.reader, read_f64)),
             RtonTag::F64Zero => visitor.visit_f64(0.0),
 
-            RtonTag::String8Direct => {
-                let len: u64 = self.reader.read_varint()?;
-                visitor.visit_string(read_8bit_string(&mut self.reader, len)?)
+            RtonTag::StringLatin1Direct => {
+                visitor.visit_string(read_latin1_string_payload(&mut self.reader)?)
             }
-            RtonTag::String8Definition => {
-                let len: u64 = self.reader.read_varint()?;
-                let s = read_8bit_string(&mut self.reader, len)?;
-                self.ref_table_90.push(s.clone());
+            RtonTag::StringLatin1Definition => {
+                let s = read_latin1_string_payload(&mut self.reader)?;
+                self.standard_latin1_strings_by_index.push(s.clone());
                 visitor.visit_string(s)
             }
-            RtonTag::String8Reference => {
+            RtonTag::StringLatin1Reference => {
                 let idx: u64 = self.reader.read_varint()?;
                 let s = self
-                    .ref_table_90
+                    .standard_latin1_strings_by_index
                     .get(idx as usize)
                     .ok_or(Error::RefIndexOutOfBounds)?
                     .clone();
@@ -433,34 +442,18 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             }
 
             RtonTag::StringUtf8Direct => {
-                let char_count: u64 = self.reader.read_varint()?;
-                let byte_len: u64 = self.reader.read_varint()?;
-                let s = read_utf8_chars(&mut self.reader, char_count)?;
-                if s.len() as u64 != byte_len {
-                    return Err(Error::StringLengthMismatch {
-                        expected: byte_len,
-                        actual: s.len() as u64,
-                    });
-                }
+                let s = read_utf8_string_payload(&mut self.reader)?;
                 visitor.visit_string(s)
             }
             RtonTag::StringUtf8Definition => {
-                let char_count: u64 = self.reader.read_varint()?;
-                let byte_len: u64 = self.reader.read_varint()?;
-                let s = read_utf8_chars(&mut self.reader, char_count)?;
-                if s.len() as u64 != byte_len {
-                    return Err(Error::StringLengthMismatch {
-                        expected: byte_len,
-                        actual: s.len() as u64,
-                    });
-                }
-                self.ref_table_92.push(s.clone());
+                let s = read_utf8_string_payload(&mut self.reader)?;
+                self.standard_utf8_strings_by_index.push(s.clone());
                 visitor.visit_string(s)
             }
             RtonTag::StringUtf8Reference => {
                 let idx: u64 = self.reader.read_varint()?;
                 let s = self
-                    .ref_table_92
+                    .standard_utf8_strings_by_index
                     .get(idx as usize)
                     .ok_or(Error::RefIndexOutOfBounds)?
                     .clone();
@@ -469,8 +462,7 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
 
             RtonTag::BinaryBlob => {
                 let _marker = self.reader.read_u8()?;
-                let len = self.reader.read_varint()?;
-                let hex_str = read_8bit_string(&mut self.reader, len)?;
+                let hex_str = read_latin1_string_payload(&mut self.reader)?;
                 let declared_len = self.reader.read_varint::<u64>()?;
                 skip_blob_raw_payload(&mut self.reader, declared_len)?;
 
@@ -484,8 +476,8 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             RtonTag::RtidNull => visitor.visit_str("RTID(0)"),
 
             RtonTag::ArrayBegin => {
-                if self.reader.read_u8()? != RtonTag::ArrayLength as u8 {
-                    return Err(Error::ArrayStartMismatch);
+                if self.reader.read_u8()? != RtonTag::ArrayCapacity as u8 {
+                    return Err(Error::ArrayCapacityTagMismatch);
                 }
                 let capacity: u64 = self.reader.read_varint()?;
                 visitor.visit_seq(RtonSeqAccess::standard(self, capacity as usize))
@@ -494,8 +486,8 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
             RtonTag::CompactObjectBegin => visitor.visit_map(RtonMapAccess::new(self)),
 
             RtonTag::CompactArrayBegin => {
-                if self.reader.read_u8()? != RtonTag::ArrayLength as u8 {
-                    return Err(Error::ArrayStartMismatch);
+                if self.reader.read_u8()? != RtonTag::ArrayCapacity as u8 {
+                    return Err(Error::ArrayCapacityTagMismatch);
                 }
                 let capacity = self.reader.read_u32::<LittleEndian>()?;
                 let offset_count = capacity
@@ -529,36 +521,36 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
                 visitor.visit_bool(b != 0)
             }
 
-            RtonTag::CompactString8Definition => {
-                let s = self.read_compact_ascii_def(false)?;
+            RtonTag::CompactLatin1StringDefinition => {
+                let s = self.read_compact_latin1_string_definition(false)?;
                 visitor.visit_string(s)
             }
-            RtonTag::CompactString8Reference => {
-                let s = self.read_compact_ascii_ref(false)?;
+            RtonTag::CompactLatin1StringReference => {
+                let s = self.read_compact_latin1_string_reference(false)?;
                 visitor.visit_string(s)
             }
             RtonTag::CompactUtf32StringDefinition => {
-                let s = self.read_compact_utf32_def(false)?;
+                let s = self.read_compact_utf32_string_definition(false)?;
                 visitor.visit_string(s)
             }
             RtonTag::CompactUtf32StringReference => {
-                let s = self.read_compact_utf32_ref(false)?;
+                let s = self.read_compact_utf32_string_reference(false)?;
                 visitor.visit_string(s)
             }
-            RtonTag::CompactString8DefinitionWithValueOffset => {
-                let s = self.read_compact_ascii_def(true)?;
+            RtonTag::CompactLatin1StringDefinitionWithValueOffset => {
+                let s = self.read_compact_latin1_string_definition(true)?;
                 visitor.visit_string(s)
             }
-            RtonTag::CompactString8ReferenceWithValueOffset => {
-                let s = self.read_compact_ascii_ref(true)?;
+            RtonTag::CompactLatin1StringReferenceWithValueOffset => {
+                let s = self.read_compact_latin1_string_reference(true)?;
                 visitor.visit_string(s)
             }
             RtonTag::CompactUtf32StringDefinitionWithValueOffset => {
-                let s = self.read_compact_utf32_def(true)?;
+                let s = self.read_compact_utf32_string_definition(true)?;
                 visitor.visit_string(s)
             }
             RtonTag::CompactUtf32StringReferenceWithValueOffset => {
-                let s = self.read_compact_utf32_ref(true)?;
+                let s = self.read_compact_utf32_string_reference(true)?;
                 visitor.visit_string(s)
             }
             _ => Err(Error::UnknownTag(tag_byte)),
@@ -661,14 +653,14 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut RtonDeserializer<'de, R
 }
 
 struct RtonSeqAccess<'a, 'de, R> {
-    de: &'a mut RtonDeserializer<'de, R>,
+    de: &'a mut Deserializer<'de, R>,
     remaining_capacity: usize,
     consumed: usize,
     expects_end_marker: bool,
     compact_offsets: Option<Vec<u32>>,
 }
 impl<'a, 'de, R: Read + Seek> RtonSeqAccess<'a, 'de, R> {
-    fn standard(de: &'a mut RtonDeserializer<'de, R>, capacity: usize) -> Self {
+    fn standard(de: &'a mut Deserializer<'de, R>, capacity: usize) -> Self {
         Self {
             de,
             remaining_capacity: capacity,
@@ -678,7 +670,7 @@ impl<'a, 'de, R: Read + Seek> RtonSeqAccess<'a, 'de, R> {
         }
     }
 
-    fn compact(de: &'a mut RtonDeserializer<'de, R>, capacity: usize, offsets: Vec<u32>) -> Self {
+    fn compact(de: &'a mut Deserializer<'de, R>, capacity: usize, offsets: Vec<u32>) -> Self {
         Self {
             de,
             remaining_capacity: capacity,
@@ -694,7 +686,7 @@ impl<'a, 'de, R: Read + Seek> RtonSeqAccess<'a, 'de, R> {
         };
 
         let Some(&expected) = offsets.get(self.consumed) else {
-            return Err(Error::ArrayLengthMismatch);
+            return Err(Error::ArrayCapacityExceeded);
         };
 
         if expected != 0 {
@@ -716,25 +708,19 @@ impl<'de, 'a, R: Read + Seek> de::SeqAccess<'de> for RtonSeqAccess<'a, 'de, R> {
     where
         T: de::DeserializeSeed<'de>,
     {
-        if self.remaining_capacity == 0 {
-            if !self.expects_end_marker {
-                self.validate_compact_offset()?;
-                return Ok(None);
-            }
-
-            let mut buf = [0u8; 1];
-            self.de.reader.read_exact(&mut buf)?;
-            if buf[0] != RtonTag::ArrayEnd as u8 {
-                return Err(Error::ArrayEndMismatch);
-            }
+        if !self.expects_end_marker && self.remaining_capacity == 0 {
+            self.validate_compact_offset()?;
             return Ok(None);
         }
 
         let mut buf = [0u8; 1];
         self.validate_compact_offset()?;
         self.de.reader.read_exact(&mut buf)?;
-        if buf[0] == RtonTag::ArrayEnd as u8 {
-            return Err(Error::ArrayLengthMismatch);
+        if self.expects_end_marker && buf[0] == RtonTag::ArrayEnd as u8 {
+            return Ok(None);
+        }
+        if self.remaining_capacity == 0 {
+            return Err(Error::ArrayCapacityExceeded);
         }
         self.de.reader.seek(SeekFrom::Current(-1))?;
         self.remaining_capacity -= 1;
@@ -744,10 +730,10 @@ impl<'de, 'a, R: Read + Seek> de::SeqAccess<'de> for RtonSeqAccess<'a, 'de, R> {
 }
 
 struct RtonMapAccess<'a, 'de, R> {
-    de: &'a mut RtonDeserializer<'de, R>,
+    de: &'a mut Deserializer<'de, R>,
 }
 impl<'a, 'de, R: Read + Seek> RtonMapAccess<'a, 'de, R> {
-    fn new(de: &'a mut RtonDeserializer<'de, R>) -> Self {
+    fn new(de: &'a mut Deserializer<'de, R>) -> Self {
         Self { de }
     }
 }

@@ -1,3 +1,10 @@
+//! Binary blob support for RTON.
+//!
+//! RTON binary blobs carry both a printable hex string and a raw byte payload.
+//! [`BinaryBlob`] stores the semantic raw bytes. In human-readable serializers
+//! such as `serde_json`, [`crate::value::Value::Binary`] is emitted as a
+//! `$BINARY("HEX", len)` string.
+
 use crate::error::Error;
 use regex::Regex;
 use serde::{Serialize, Serializer};
@@ -5,6 +12,10 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
+/// Raw bytes stored in an RTON BinaryBlob value.
+///
+/// `Display` renders the PvZ-style textual form:
+/// `$BINARY("0A0B", 2)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryBlob(pub Vec<u8>);
 

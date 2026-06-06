@@ -1,47 +1,169 @@
 # serde_rton
 
-A high-performance Rust library for serializing and deserializing the **RTON** (Reflection Object Notation) data format using the [Serde](https://serde.rs/) framework.
+`serde_rton` is a Serde-based reader and writer for PopCap/PvZ2 RTON
+(Reflection Object Notation) files.
 
-RTON is a binary data format commonly used in PopCap framework games (e.g., *Plants vs. Zombies 2*). This library provides a robust interface to parse RTON files into Rust structs or dynamic ASTs, and serialize them back with high fidelity.
+The crate focuses on binary RTON. For JSON, use `serde_json` directly with
+Serde. There is no separate PvZ2 JSON bridge API in this crate.
 
-## 🚀 Features
+## Features
 
-* **Full Serde Integration**: Implements `Serializer` and `Deserializer` traits efficiently.
-* **High-Fidelity Types**:
-    * Supports specific integer widths (`i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`) to preserve the exact binary layout.
-    * Distinguishes between Fixed-width integers and Variable-length integers (VarInts).
-* **RTON Specific Optimizations**:
-    * **Zero-Value Optimization**: Automatically uses dedicated zero-tags (e.g., `I32Zero`) to save space.
-    * **String Interning**: Handles reference counting for strings (`String8Reference`, `StringUtf8Reference`).
-    * **Native RTID Support**: Parses and serializes Resource Type IDs (`0x83`).
-    * **Order Preservation**: Object keys are maintained in their insertion order (critical for binary game data stability).
-* **Zero-Copy Deserialization**: Capable of borrowing string slices where possible.
-* **Encryption Support**: Seamlessly handles Rijndael-192-CBC encrypted files commonly found in games.
-* **Robust Validation**: Ensures data integrity with UTF-8 string length checks.
+- Deserialize RTON into ordinary Rust structs with `serde::Deserialize`.
+- Serialize Rust values back to standard RTON with `serde::Serialize`.
+- Use `serde_rton::Value` as a dynamic AST when the schema is unknown.
+- Preserve object entry order and duplicate keys when using `Value`.
+- Read standard RTON files and PvZ2 compact runtime RTON files.
+- Write standard RTON with `to_bytes` / `to_writer`.
+- Write compact runtime RTON with `to_compact_bytes` / `to_compact_writer`.
+- Support RTID values, BinaryBlob values, string interning, direct strings, and
+  explicit VarInt wrappers.
+- Provide Rijndael-192-CBC helpers for encrypted PvZ2 RTON payloads.
 
-## 📦 Installation
-
-Add the following to your `Cargo.toml`:
+## Installation
 
 ```toml
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_rton = { path = "." } # If using locally
-# or via git:
-# serde_rton = { git = "https://github.com/LambdaEd1th/serde_rton" }
+serde_json = "1.0" # only needed if you want JSON output/input
+serde_rton = { git = "https://github.com/LambdaEd1th/serde_rton" }
 ```
 
-## 📖 Usage
+For local development inside this repository:
 
-### 1. Strongly Typed Deserialization
+```toml
+serde_rton = { path = "." }
+```
 
-Define a Rust struct that matches the RTON file structure.
+## RTON to JSON with serde_json
+
+Use `serde_rton::Value` if you want a generic RTON tree, then pass it directly
+to `serde_json`.
+
+```rust
+use serde_rton::{from_bytes, Value};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rton = std::fs::read("config.rton")?;
+    let value: Value = from_bytes(&rton)?;
+
+    let json = serde_json::to_string_pretty(&value)?;
+    std::fs::write("config.json", json)?;
+
+    Ok(())
+}
+```
+
+`Value::Object` stores entries as `Vec<(String, Value)>`, so duplicate object
+keys and entry order are preserved when serializing through `serde_json`.
+Avoid converting through `serde_json::Value` or a `HashMap` if duplicate keys or
+ordering matter.
+
+## JSON to RTON with serde_json
+
+Deserialize JSON directly into `serde_rton::Value`, then write RTON.
+
+```rust
+use serde_rton::{to_bytes, Value};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let json = std::fs::read("config.json")?;
+    let value: Value = serde_json::from_slice(&json)?;
+
+    let rton = to_bytes(&value)?;
+    std::fs::write("config.rton", rton)?;
+
+    Ok(())
+}
+```
+
+For known schemas, deserialize JSON into your own struct and serialize that
+struct to RTON:
 
 ```rust
 use serde::{Deserialize, Serialize};
-use serde_rton::from_bytes;
+use serde_rton::to_bytes;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+struct LevelConfig {
+    objclass: String,
+    flags: Vec<String>,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let json = std::fs::read("level.json")?;
+    let config: LevelConfig = serde_json::from_slice(&json)?;
+
+    let rton = to_bytes(&config)?;
+    std::fs::write("level.rton", rton)?;
+
+    Ok(())
+}
+```
+
+## Important JSON Semantics
+
+JSON is a semantic text format here. It is not an exact RTON tag-preserving
+format.
+
+- Integer width is not preserved. For example, `Value::Int32(1)` serializes as
+  JSON number `1`; reading that JSON back into `Value` may produce
+  `Value::UInt8(1)` or another smallest fitting numeric variant.
+- VarInt tags are not preserved. `Value::VarIntI32(VarInt(1))` becomes a JSON
+  number and is read back as a normal integer value.
+- RTID values serialize as strings such as `"RTID(0)"` or
+  `"RTID(name@parent)"`. Valid RTID strings are read back as `Value::Rtid`.
+- Binary blobs serialize as strings like `"$BINARY(\"0A0B\", 2)"` in
+  human-readable formats. Reading that JSON string back into `Value` produces a
+  normal `Value::String`, not `Value::Binary`.
+- `Value::Null` serializes as JSON `null`, but JSON `null` is not currently
+  accepted by `Value` deserialization. For PvZ2 RTID-null semantics, use the
+  string `"RTID(0)"`.
+- `serde_json` does not accept `NaN`, `Infinity`, or `-Infinity` as input.
+  Serializing non-finite Rust floats with `serde_json` produces JSON `null`,
+  which is not a reversible `Value` representation.
+- Large `u64` values serialize as JSON numbers. Some JSON consumers, especially
+  JavaScript, may lose precision above `2^53 - 1`.
+
+If you need exact binary semantics, keep the data in RTON and use
+`serde_rton::Value` plus `to_bytes` or `to_compact_bytes`.
+
+## Dynamic Value Editing
+
+Use `Value` when you need to edit unknown files without defining Rust structs.
+
+```rust
+use serde_rton::{from_bytes, to_bytes, Rtid, Value};
+
+fn main() -> serde_rton::Result<()> {
+    let data = std::fs::read("config.rton")?;
+    let mut value: Value = from_bytes(&data)?;
+
+    if let Value::Object(entries) = &mut value {
+        entries.push(("enabled".to_string(), Value::Bool(true)));
+        entries.push(("score".to_string(), Value::Int16(1024)));
+        entries.push((
+            "resource".to_string(),
+            Value::Rtid(Rtid::Raw {
+                name: "Plant".to_string(),
+                parent: "Images".to_string(),
+            }),
+        ));
+    }
+
+    std::fs::write("config_edited.rton", to_bytes(&value)?)?;
+    Ok(())
+}
+```
+
+## Strongly Typed RTON
+
+For stable schemas, normal Serde structs are more ergonomic than `Value`.
+
+```rust
+use serde::{Deserialize, Serialize};
+use serde_rton::{from_bytes, to_bytes};
+
+#[derive(Debug, Deserialize, Serialize)]
 struct LevelData {
     version: u32,
     #[serde(rename = "objclass")]
@@ -49,7 +171,7 @@ struct LevelData {
     props: LevelProps,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 struct LevelProps {
     zombies: Vec<String>,
     waves: i32,
@@ -57,133 +179,122 @@ struct LevelProps {
 
 fn main() -> serde_rton::Result<()> {
     let data = std::fs::read("level.rton")?;
-    let level: LevelData = from_bytes(&data)?;
-    
-    println!("Loaded Level: {}", level.class_name);
+    let mut level: LevelData = from_bytes(&data)?;
+
+    level.props.waves += 1;
+
+    std::fs::write("level_edited.rton", to_bytes(&level)?)?;
     Ok(())
 }
-
 ```
 
-### 2. Dynamic AST (`RtonValue`)
+## Controlling RTON Encoding
 
-Use `RtonValue` when the schema is unknown or when you need to preserve the exact integer types of the original binary file.
+Most users can rely on the default serializer. When you need specific RTON
+encoding behavior, use the wrapper types.
 
 ```rust
-use serde_rton::{from_bytes, to_bytes, RtonValue};
+use serde::Serialize;
+use serde_rton::{DirectStr, VarInt};
+
+#[derive(Serialize)]
+struct EncodedFields {
+    // Forces signed varint tag selection instead of the adaptive default.
+    compact_i32: VarInt<i32>,
+
+    // Emits a direct string tag (0x81/0x82) instead of an interned string
+    // definition/reference pair (0x90-0x93).
+    direct_name: DirectStr<String>,
+}
+```
+
+## Compact Runtime RTON
+
+PvZ2 also has a compact runtime RTON form using tags such as `0xB0`-`0xBC`.
+This crate can read compact files and can write semantic `Value` trees to the
+compact runtime form.
+
+```rust
+use serde_rton::{to_compact_bytes, Value};
 
 fn main() -> serde_rton::Result<()> {
-    let data = std::fs::read("config.rton")?;
-    
-    // Deserialize to dynamic AST
-    let mut value: RtonValue = from_bytes(&data)?;
-    
-    // Modify the data
-    if let RtonValue::Object(ref mut entries) = value {
-        // Add a new specific integer type
-        entries.push(("new_score".to_string(), RtonValue::Int16(1024)));
-        // Add a specialized RTID string
-        entries.push(("resource".to_string(), RtonValue::String("RTID(123@path)".to_string())));
-    }
-
-    // Serialize back to bytes
-    let new_bytes = to_bytes(&value)?;
-    std::fs::write("config_edited.rton", new_bytes)?;
-    
-    Ok(())
-}
-
-```
-
-### 3. Converting to JSON/YAML
-
-Use standard Serde formats such as `serde_json` or `serde_yaml` directly when
-you want text output for debugging. This crate intentionally does not expose a
-separate PvZ2-specific JSON bridge.
-
-> **⚠️ Note on `u64`**: RTON supports full 64-bit unsigned integers. Standard JSON parsers (like in JavaScript) may lose precision for numbers larger than `2^53 - 1` (`Number.MAX_SAFE_INTEGER`). This library serializes `u64` as native numbers. If you need safe JSON interop for huge IDs, consider wrapping them or post-processing.
-
-```rust
-use serde_rton::{from_bytes, RtonValue};
-
-fn main() {
-    let rton_data = std::fs::read("data.rton").unwrap();
-    let val: RtonValue = from_bytes(&rton_data).unwrap();
-
-    let json_output = serde_json::to_string_pretty(&val).unwrap();
-    println!("{}", json_output);
-}
-
-```
-
-### 🔒 Encryption Support
-
-RTON files can be encrypted using Rijndael-192-CBC (key derived from MD5 hash of a seed string). This library supports transparent decryption and encryption.
-
-```rust
-use serde_rton::{from_bytes_with_key, to_bytes_with_key, Result};
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize)]
-struct SecureConfig {
-    api_key: String,
-}
-
-fn main() -> Result<()> {
-    let key_seed = "my_secret_seed"; // Key is derived from MD5(seed)
-    
-    // Reading encrypted file
-    let data = std::fs::read("encrypted.rton")?;
-    let config: SecureConfig = from_bytes_with_key(&data, Some(key_seed))?;
-    
-    // Writing encrypted file
-    let new_data = to_bytes_with_key(&config, Some(key_seed))?;
-    std::fs::write("encrypted_new.rton", new_data)?;
-    
+    let value = Value::Object(vec![("flag".to_string(), Value::Bool(true))]);
+    let bytes = to_compact_bytes(&value)?;
+    std::fs::write("runtime.rton", bytes)?;
     Ok(())
 }
 ```
 
-## 🧩 Data Type Mapping
+## Encrypted RTON Payloads
 
-| RTON Identifier | Rust Type | Notes |
+PvZ2 encrypted RTON payloads use a `[0x10, 0x00]` prefix and
+Rijndael-192-CBC. The crypto helpers operate on bytes; after decrypting, pass
+the plaintext to `from_bytes`.
+
+```rust
+use serde_rton::crypto::{decrypt_data, encrypt_data};
+use serde_rton::{from_bytes, to_bytes, Value};
+
+fn main() -> serde_rton::Result<()> {
+    let encrypted = std::fs::read("encrypted.rton")?;
+    let plain = decrypt_data(&encrypted)?;
+
+    let value: Value = from_bytes(&plain)?;
+    let edited = to_bytes(&value)?;
+    let encrypted_edited = encrypt_data(&edited)?;
+
+    std::fs::write("encrypted_edited.rton", encrypted_edited)?;
+    Ok(())
+}
+```
+
+## RTON Mapping
+
+| RTON concept | Rust representation | Notes |
 | --- | --- | --- |
-| `BooleanTrue` / `BooleanFalse` | `bool` |  |
-| `I8` / `U8` | `i8` / `u8` |  |
-| `I16` / `U16` | `i16` / `u16` |  |
-| `I32` / `U32` | `i32` / `u32` |  |
-| `I64` / `U64` | `i64` / `u64` | Native serialization (8 bytes) |
-| `VarInt` | `i64` / `u64` | Variable-length encoding (LEB128/ZigZag) |
-| `F32` | `f32` |  |
-| `F64` | `f64` |  |
-| `String` | `String` | Supports ASCII and UTF-8 interning |
-| `BinaryBlob` (0x87) | `Vec<u8>` | Raw byte arrays |
-| `RTID` (0x83) | `String` | Formats: `RTID(uid@path)`, `RTID(str@str)`, `RTID(0)` |
-| `Array` | `Vec<RtonValue>` | Prefixed with length |
-| `Object` | `Vec<(String, RtonValue)>` | Key-Value pairs, preserves order |
+| Booleans | `bool` / `Value::Bool` | Uses dedicated true/false tags |
+| Fixed integers | `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64` | Zero tags are used when appropriate |
+| VarInts | `VarInt<T>` / `Value::VarInt*` | Exact VarInt tags are not preserved through JSON |
+| Floats | `f32`, `f64` / `Value::Float`, `Value::Double` | Non-finite values are not JSON reversible |
+| Strings | `String` / `Value::String` | Standard writer interns strings by default |
+| Direct strings | `DirectStr<T>` | Forces direct string tags |
+| BinaryBlob | `BinaryBlob` / `Value::Binary` | Human-readable JSON emits `$BINARY(...)` text |
+| RTID | `Rtid` / `Value::Rtid` | Human-readable JSON emits RTID strings |
+| Array | `Vec<T>` / `Value::Array` | Standard arrays may end before declared capacity |
+| Object | structs/maps / `Value::Object` | `Value` preserves order and duplicate keys |
 
-## 🛠 Project Structure
+## Project Layout
 
-* **`src/lib.rs`**: Library entry point and re-exports.
-* **`src/types.rs`**: File markers, `RtonTag` / `RtidPayloadTag`, `RtonValue`, and RTID types.
-* **`src/ser.rs`**: Implementation of `serde::Serializer`.
-* **`src/de.rs`**: Implementation of `serde::Deserializer`.
-* **`src/error.rs`**: Custom error types (`serde_rton::Error`).
-* **`src/binary.rs`**: Binary read/write helper utilities.
-* **`src/varint.rs`**: VarInt encoding and direct-string serialization helpers.
-* **`src/crypto.rs`**: Rijndael-192-CBC helpers for encrypted RTON files.
+- `src/lib.rs`: crate entry point and public re-exports.
+- `src/de.rs`: RTON deserializer.
+- `src/ser.rs`: standard and compact RTON serializers.
+- `src/value.rs`: dynamic `Value` AST and Serde implementation.
+- `src/rtid.rs`: RTID value parsing and serialization.
+- `src/tags.rs`: file markers and tag identifiers.
+- `src/binary.rs`: `BinaryBlob` support.
+- `src/varint.rs`: `VarInt` and `DirectStr` wrappers.
+- `src/crypto.rs`: encrypted RTON helpers.
+- `samples/rton/`: curated real-world RTON fixtures.
 
-## 🧪 Testing
-
-The project includes unit tests and integration tests for Round-Trip conversion (RTON -> JSON -> RTON).
+## Testing
 
 ```bash
+cargo fmt
 cargo test
-
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-## 📄 License
+The curated fixtures under `samples/rton/` are included in `cargo test` and are
+checked with:
 
-This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+- `RTON -> Value`
+- `RTON -> Value -> standard RTON -> Value`
+- `RTON -> Value -> compact RTON -> Value`
+- `RTON -> Value -> serde_json -> Value -> RTON`
 
-```
+The larger local corpus under `sample/`, when present, has also been checked
+with the same flow.
+
+## License
+
+GPL-3.0-or-later

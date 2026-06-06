@@ -1,9 +1,30 @@
+//! Serialization wrappers for choosing specific RTON encodings.
+//!
+//! These wrappers are useful when the Rust semantic type is not enough to pick
+//! the desired binary RTON tag. They affect binary RTON output; through
+//! human-readable formats such as JSON they serialize as their inner values.
+
 use serde::{Deserialize, Serialize, Serializer};
 
 // ============================================================================
 // VarInt — force compact varint encoding for integers
 // ============================================================================
 
+/// Wrapper that forces VarInt encoding for integer fields.
+///
+/// Without this wrapper, the standard serializer chooses between fixed-width
+/// tags and compact VarInt tags adaptively. `VarInt<T>` requests the VarInt
+/// path explicitly for supported integer types.
+///
+/// ```
+/// use serde::Serialize;
+/// use serde_rton::VarInt;
+///
+/// #[derive(Serialize)]
+/// struct Packet {
+///     id: VarInt<u32>,
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VarInt<T>(pub T);
 
@@ -46,7 +67,7 @@ impl Serialize for VarInt<u64> {
 // ============================================================================
 // DirectStr — force direct string encoding (0x81/0x82) without interning
 //
-// PvZ2 uses direct strings when `arg3 == 0` in the ASCII/UTF-8 writer
+// PvZ2 uses direct strings when `arg3 == 0` in the Latin-1/UTF-8 writer
 // helpers (`sub_1024e76bc` / `sub_1024e77cc`).  Wrap a `&str` or `String`
 // in `DirectStr` to skip the interning cache and emit tag 0x81 or 0x82.
 // ============================================================================
