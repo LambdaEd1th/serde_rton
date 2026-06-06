@@ -18,7 +18,7 @@ const ENCRYPTED_PREFIX: [u8; 2] = [0x10, 0x00];
 /// Derives the Rijndael key and IV from a seed string using MD5.
 ///
 /// Returns `(key, iv)`.
-pub fn derive_key_iv(seed: &str) -> (Vec<u8>, Vec<u8>) {
+fn derive_key_iv(seed: &str) -> (Vec<u8>, Vec<u8>) {
     let digest: [u8; 16] = Md5::digest(seed.as_bytes()).into();
     let hex_string = hex::encode(digest); // String (32 chars)
     let hex_bytes = hex_string.as_bytes(); // &[u8] (32 bytes)
