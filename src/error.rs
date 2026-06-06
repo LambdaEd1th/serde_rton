@@ -1,7 +1,10 @@
+//! Error types for RTON parsing, serialization, and crypto helpers.
+
 use serde::{de, ser};
 use std::fmt::Display;
 use thiserror::Error;
 
+/// Error returned by `serde_rton` operations.
 #[derive(Error, Debug)]
 pub enum Error {
     // === External Errors (Automatic conversion) ===
@@ -42,8 +45,8 @@ pub enum Error {
     #[error("Expected array end marker 0xfe")]
     ArrayEndMismatch,
 
-    #[error("Expected array start marker 0xfd")]
-    ArrayStartMismatch,
+    #[error("Expected array capacity marker 0xfd")]
+    ArrayCapacityTagMismatch,
 
     #[error("Invalid UTF-8 start byte: {0:#02x}")]
     InvalidUtf8StartByte(u8),
@@ -51,8 +54,8 @@ pub enum Error {
     #[error("Game Crash: Array overflowed declared capacity")]
     ArrayOverflow,
 
-    #[error("Array ended before consuming declared capacity")]
-    ArrayLengthMismatch,
+    #[error("Array exceeded declared capacity")]
+    ArrayCapacityExceeded,
 
     // === Format Specific Errors ===
     #[error("Invalid RTID format: {0}")]
@@ -91,4 +94,5 @@ impl de::Error for Error {
     }
 }
 
+/// Crate-local result type.
 pub type Result<T> = std::result::Result<T, Error>;

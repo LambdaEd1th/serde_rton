@@ -69,6 +69,3 @@ Desktop.ini
 # Vim / Emacs temporary files
 *.swp
 *.swo
-
-/tests/test_from_json.rton
-/tests/test_from_yaml.rton

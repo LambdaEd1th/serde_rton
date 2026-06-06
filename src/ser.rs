@@ -1,3 +1,9 @@
+//! RTON serialization.
+//!
+//! [`to_bytes`] and [`to_writer`] write standard RTON files. [`to_compact_bytes`]
+//! and [`to_compact_writer`] write PvZ2's compact runtime RTON form from a
+//! semantic [`Value`] tree.
+
 use byteorder::{LittleEndian, WriteBytesExt};
 use integer_encoding::VarIntWriter;
 use serde::{Serialize, ser};
@@ -7,17 +13,17 @@ use std::io::Write;
 
 use crate::binary::BinaryBlob;
 use crate::error::{Error, Result};
-use crate::types::{
-    COMPACT_FILE_VERSION, FILE_FOOTER, FILE_HEADER, FILE_VERSION, Rtid, RtonTag, RtonValue,
-};
+use crate::rtid::Rtid;
+use crate::tags::{COMPACT_FILE_VERSION, FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtonTag};
+use crate::value::Value;
 
 // === Helper Functions for String Writing ===
 
-fn is_8bit_string(s: &str) -> bool {
+fn fits_latin1_string(s: &str) -> bool {
     s.chars().all(|ch| (ch as u32) <= 0xff)
 }
 
-fn write_8bit_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
+fn write_latin1_string_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
     writer.write_varint(s.chars().count() as u64)?;
     for ch in s.chars() {
         writer.write_u8(ch as u8)?;
@@ -25,7 +31,7 @@ fn write_8bit_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_utf8_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
+fn write_utf8_string_payload<W: Write>(writer: &mut W, s: &str) -> Result<()> {
     writer.write_varint(s.chars().count() as u64)?;
     writer.write_varint(s.len() as u64)?;
     writer.write_all(s.as_bytes())?;
@@ -82,26 +88,34 @@ enum PendingVarInt {
     U64,
 }
 
-pub struct RtonSerializer<W> {
+/// Serde serializer for standard RTON streams.
+///
+/// Most callers should use [`to_bytes`] or [`to_writer`]. Direct construction is
+/// useful only when integrating with custom framing; it does not write the RTON
+/// file header or footer by itself.
+pub struct Serializer<W> {
     writer: W,
-    cache_90: HashMap<String, u32>,
-    next_idx_90: u32,
-    cache_92: HashMap<String, u32>,
-    next_idx_92: u32,
+    standard_latin1_indices_by_string: HashMap<String, u32>,
+    next_standard_latin1_string_index: u32,
+    standard_utf8_indices_by_string: HashMap<String, u32>,
+    next_standard_utf8_string_index: u32,
     is_root: bool,
     pending_varint: PendingVarInt,
     pending_rtid: bool,
     pending_direct_str: bool,
 }
 
-impl<W: Write> RtonSerializer<W> {
+impl<W: Write> Serializer<W> {
+    /// Creates a serializer over an already-positioned writer.
+    ///
+    /// Use [`to_writer`] when serializing a complete RTON file.
     pub fn new(writer: W) -> Self {
-        RtonSerializer {
+        Serializer {
             writer,
-            cache_90: HashMap::new(),
-            next_idx_90: 0,
-            cache_92: HashMap::new(),
-            next_idx_92: 0,
+            standard_latin1_indices_by_string: HashMap::new(),
+            next_standard_latin1_string_index: 0,
+            standard_utf8_indices_by_string: HashMap::new(),
+            next_standard_utf8_string_index: 0,
             is_root: true,
             pending_varint: PendingVarInt::None,
             pending_rtid: false,
@@ -110,24 +124,27 @@ impl<W: Write> RtonSerializer<W> {
     }
 
     fn write_interned_string(&mut self, v: &str) -> Result<()> {
-        if is_8bit_string(v) {
-            if let Some(&idx) = self.cache_90.get(v) {
-                self.writer.write_u8(RtonTag::String8Reference as u8)?;
+        if fits_latin1_string(v) {
+            if let Some(&idx) = self.standard_latin1_indices_by_string.get(v) {
+                self.writer.write_u8(RtonTag::StringLatin1Reference as u8)?;
                 self.writer.write_varint(idx as u64)?;
             } else {
-                self.writer.write_u8(RtonTag::String8Definition as u8)?;
-                write_8bit_payload(&mut self.writer, v)?;
-                self.cache_90.insert(v.to_string(), self.next_idx_90);
-                self.next_idx_90 += 1;
+                self.writer
+                    .write_u8(RtonTag::StringLatin1Definition as u8)?;
+                write_latin1_string_payload(&mut self.writer, v)?;
+                self.standard_latin1_indices_by_string
+                    .insert(v.to_string(), self.next_standard_latin1_string_index);
+                self.next_standard_latin1_string_index += 1;
             }
-        } else if let Some(&idx) = self.cache_92.get(v) {
+        } else if let Some(&idx) = self.standard_utf8_indices_by_string.get(v) {
             self.writer.write_u8(RtonTag::StringUtf8Reference as u8)?;
             self.writer.write_varint(idx as u64)?;
         } else {
             self.writer.write_u8(RtonTag::StringUtf8Definition as u8)?;
-            write_utf8_payload(&mut self.writer, v)?;
-            self.cache_92.insert(v.to_string(), self.next_idx_92);
-            self.next_idx_92 += 1;
+            write_utf8_string_payload(&mut self.writer, v)?;
+            self.standard_utf8_indices_by_string
+                .insert(v.to_string(), self.next_standard_utf8_string_index);
+            self.next_standard_utf8_string_index += 1;
         }
         Ok(())
     }
@@ -136,31 +153,38 @@ impl<W: Write> RtonSerializer<W> {
     /// This matches PvZ2's direct-string path (`arg3 == 0` in
     /// `sub_1024e76bc` / `sub_1024e77cc`).
     fn write_direct_string(&mut self, v: &str) -> Result<()> {
-        if is_8bit_string(v) {
-            self.writer.write_u8(RtonTag::String8Direct as u8)?;
-            write_8bit_payload(&mut self.writer, v)?;
+        if fits_latin1_string(v) {
+            self.writer.write_u8(RtonTag::StringLatin1Direct as u8)?;
+            write_latin1_string_payload(&mut self.writer, v)?;
         } else {
             self.writer.write_u8(RtonTag::StringUtf8Direct as u8)?;
-            write_utf8_payload(&mut self.writer, v)?;
+            write_utf8_string_payload(&mut self.writer, v)?;
         }
         Ok(())
     }
 }
 
-/// Serializes the given data structure to a RTON byte vector.
+/// Serializes `value` to a complete standard RTON file in memory.
+///
+/// The returned bytes include the `RTON` header, version word, encoded payload,
+/// and `DONE` footer.
 pub fn to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     to_writer(&mut data, value)?;
     Ok(data)
 }
 
-/// Serializes the given data structure as RTON into the IO stream.
+/// Serializes `value` as a complete standard RTON file into `writer`.
+///
+/// Strings are interned by default using `StringLatin1Definition` /
+/// `StringUtf8Definition` and their reference tags. Wrap strings in
+/// [`crate::DirectStr`] to force direct string tags instead.
 pub fn to_writer<W: Write, T: Serialize>(mut writer: W, value: &T) -> Result<()> {
     write_header(&mut writer)?;
 
     // Create serializer borrowing the writer
     {
-        let mut serializer = RtonSerializer::new(&mut writer);
+        let mut serializer = Serializer::new(&mut writer);
         value.serialize(&mut serializer)?;
     }
 
@@ -168,15 +192,19 @@ pub fn to_writer<W: Write, T: Serialize>(mut writer: W, value: &T) -> Result<()>
     Ok(())
 }
 
-/// Serializes a semantic [`RtonValue`] into PvZ2's compact runtime RTON form.
-pub fn to_compact_bytes(value: &RtonValue) -> Result<Vec<u8>> {
+/// Serializes a semantic [`Value`] into PvZ2's compact runtime RTON form.
+///
+/// Compact RTON uses version [`COMPACT_FILE_VERSION`] and compact tags such as
+/// `0xB0`-`0xBC`. It is intended for runtime-compatible semantic output rather
+/// than preserving every original standard RTON tag.
+pub fn to_compact_bytes(value: &Value) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     to_compact_writer(&mut data, value)?;
     Ok(data)
 }
 
-/// Serializes a semantic [`RtonValue`] into PvZ2's compact runtime RTON form.
-pub fn to_compact_writer<W: Write>(mut writer: W, value: &RtonValue) -> Result<()> {
+/// Serializes a semantic [`Value`] as compact runtime RTON into `writer`.
+pub fn to_compact_writer<W: Write>(mut writer: W, value: &Value) -> Result<()> {
     let mut compact = CompactRtonWriter::new();
     compact.write_header()?;
     compact.write_value(value)?;
@@ -187,16 +215,16 @@ pub fn to_compact_writer<W: Write>(mut writer: W, value: &RtonValue) -> Result<(
 
 struct CompactRtonWriter {
     bytes: Vec<u8>,
-    ascii_offsets: HashMap<String, u32>,
-    wide_offsets: HashMap<String, u32>,
+    compact_latin1_offsets_by_string: HashMap<String, u32>,
+    compact_utf32_offsets_by_string: HashMap<String, u32>,
 }
 
 impl CompactRtonWriter {
     fn new() -> Self {
         Self {
             bytes: Vec::new(),
-            ascii_offsets: HashMap::new(),
-            wide_offsets: HashMap::new(),
+            compact_latin1_offsets_by_string: HashMap::new(),
+            compact_utf32_offsets_by_string: HashMap::new(),
         }
     }
 
@@ -232,19 +260,19 @@ impl CompactRtonWriter {
     }
 
     fn write_compact_string(&mut self, value: &str, paired: bool) -> Result<Option<usize>> {
-        if is_8bit_string(value) {
-            self.write_compact_ascii_string(value, paired)
+        if fits_latin1_string(value) {
+            self.write_compact_latin1_string(value, paired)
         } else {
-            self.write_compact_wide_string(value, paired)
+            self.write_compact_utf32_string(value, paired)
         }
     }
 
-    fn write_compact_ascii_string(&mut self, value: &str, paired: bool) -> Result<Option<usize>> {
-        if let Some(&offset) = self.ascii_offsets.get(value) {
+    fn write_compact_latin1_string(&mut self, value: &str, paired: bool) -> Result<Option<usize>> {
+        if let Some(&offset) = self.compact_latin1_offsets_by_string.get(value) {
             self.write_u8_tag(if paired {
-                RtonTag::CompactString8ReferenceWithValueOffset
+                RtonTag::CompactLatin1StringReferenceWithValueOffset
             } else {
-                RtonTag::CompactString8Reference
+                RtonTag::CompactLatin1StringReference
             })?;
             self.bytes.write_u32::<LittleEndian>(offset)?;
             return if paired {
@@ -255,9 +283,9 @@ impl CompactRtonWriter {
         }
 
         self.write_u8_tag(if paired {
-            RtonTag::CompactString8DefinitionWithValueOffset
+            RtonTag::CompactLatin1StringDefinitionWithValueOffset
         } else {
-            RtonTag::CompactString8Definition
+            RtonTag::CompactLatin1StringDefinition
         })?;
         self.bytes
             .write_u32::<LittleEndian>(value.chars().count() as u32 + 1)?;
@@ -266,7 +294,8 @@ impl CompactRtonWriter {
             self.bytes.write_u8(ch as u8)?;
         }
         self.bytes.write_u8(0)?;
-        self.ascii_offsets.insert(value.to_string(), offset);
+        self.compact_latin1_offsets_by_string
+            .insert(value.to_string(), offset);
         if paired {
             self.write_aux_placeholder().map(Some)
         } else {
@@ -274,8 +303,8 @@ impl CompactRtonWriter {
         }
     }
 
-    fn write_compact_wide_string(&mut self, value: &str, paired: bool) -> Result<Option<usize>> {
-        if let Some(&offset) = self.wide_offsets.get(value) {
+    fn write_compact_utf32_string(&mut self, value: &str, paired: bool) -> Result<Option<usize>> {
+        if let Some(&offset) = self.compact_utf32_offsets_by_string.get(value) {
             self.write_u8_tag(if paired {
                 RtonTag::CompactUtf32StringReferenceWithValueOffset
             } else {
@@ -301,7 +330,8 @@ impl CompactRtonWriter {
             self.bytes.write_u32::<LittleEndian>(ch as u32)?;
         }
         self.bytes.write_u32::<LittleEndian>(0)?;
-        self.wide_offsets.insert(value.to_string(), offset);
+        self.compact_utf32_offsets_by_string
+            .insert(value.to_string(), offset);
         if paired {
             self.write_aux_placeholder().map(Some)
         } else {
@@ -309,7 +339,7 @@ impl CompactRtonWriter {
         }
     }
 
-    fn write_utf8_payload(&mut self, value: &str) -> Result<()> {
+    fn write_utf8_string_payload(&mut self, value: &str) -> Result<()> {
         self.bytes.write_varint(value.chars().count() as u64)?;
         self.bytes.write_varint(value.len() as u64)?;
         self.bytes.write_all(value.as_bytes())?;
@@ -327,7 +357,7 @@ impl CompactRtonWriter {
             } => {
                 if let Some(name) = name {
                     self.bytes.write_u8(2)?;
-                    self.write_utf8_payload(name)?;
+                    self.write_utf8_string_payload(name)?;
                 } else {
                     self.bytes.write_u8(1)?;
                 }
@@ -337,8 +367,8 @@ impl CompactRtonWriter {
             }
             Rtid::Raw { name, parent } => {
                 self.bytes.write_u8(3)?;
-                self.write_utf8_payload(name)?;
-                self.write_utf8_payload(parent)?;
+                self.write_utf8_string_payload(name)?;
+                self.write_utf8_string_payload(parent)?;
             }
         }
         Ok(())
@@ -352,15 +382,15 @@ impl CompactRtonWriter {
             write!(&mut hex_str, "{:02X}", b)?;
         }
 
-        self.write_compact_ascii_string(&hex_str, false)?;
+        self.write_compact_latin1_string(&hex_str, false)?;
         self.bytes.write_u32::<LittleEndian>(value.0.len() as u32)?;
         self.bytes.write_all(&value.0)?;
         Ok(())
     }
 
-    fn write_array(&mut self, values: &[RtonValue]) -> Result<()> {
+    fn write_array(&mut self, values: &[Value]) -> Result<()> {
         self.write_u8_tag(RtonTag::CompactArrayBegin)?;
-        self.write_u8_tag(RtonTag::ArrayLength)?;
+        self.write_u8_tag(RtonTag::ArrayCapacity)?;
         self.bytes.write_u32::<LittleEndian>(values.len() as u32)?;
 
         let table_offset = self.bytes.len();
@@ -379,7 +409,7 @@ impl CompactRtonWriter {
         Ok(())
     }
 
-    fn write_object(&mut self, entries: &[(String, RtonValue)]) -> Result<()> {
+    fn write_object(&mut self, entries: &[(String, Value)]) -> Result<()> {
         self.write_u8_tag(RtonTag::CompactObjectBegin)?;
         for (key, value) in entries {
             let aux_offset = self.write_compact_string(key, true)?;
@@ -392,72 +422,72 @@ impl CompactRtonWriter {
         Ok(())
     }
 
-    fn write_value(&mut self, value: &RtonValue) -> Result<()> {
+    fn write_value(&mut self, value: &Value) -> Result<()> {
         match value {
-            RtonValue::Null => {
+            Value::Null => {
                 self.write_u8_tag(RtonTag::CompactRtid)?;
                 self.bytes.write_u8(0)?;
             }
-            RtonValue::Bool(value) => {
+            Value::Bool(value) => {
                 self.write_u8_tag(RtonTag::CompactBoolean)?;
                 self.bytes.write_u8(u8::from(*value))?;
             }
-            RtonValue::Int8(value) => {
+            Value::Int8(value) => {
                 self.write_u8_tag(RtonTag::I8)?;
                 self.bytes.write_i8(*value)?;
             }
-            RtonValue::UInt8(value) => {
+            Value::UInt8(value) => {
                 self.write_u8_tag(RtonTag::U8)?;
                 self.bytes.write_u8(*value)?;
             }
-            RtonValue::Int16(value) => {
+            Value::Int16(value) => {
                 self.write_u8_tag(RtonTag::I16)?;
                 self.bytes.write_i16::<LittleEndian>(*value)?;
             }
-            RtonValue::UInt16(value) => {
+            Value::UInt16(value) => {
                 self.write_u8_tag(RtonTag::U16)?;
                 self.bytes.write_u16::<LittleEndian>(*value)?;
             }
-            RtonValue::Int32(value) | RtonValue::VarIntI32(crate::varint::VarInt(value)) => {
+            Value::Int32(value) | Value::VarIntI32(crate::varint::VarInt(value)) => {
                 self.write_u8_tag(RtonTag::I32)?;
                 self.bytes.write_i32::<LittleEndian>(*value)?;
             }
-            RtonValue::UInt32(value) | RtonValue::VarIntU32(crate::varint::VarInt(value)) => {
+            Value::UInt32(value) | Value::VarIntU32(crate::varint::VarInt(value)) => {
                 self.write_u8_tag(RtonTag::U32)?;
                 self.bytes.write_u32::<LittleEndian>(*value)?;
             }
-            RtonValue::Int64(value) | RtonValue::VarIntI64(crate::varint::VarInt(value)) => {
+            Value::Int64(value) | Value::VarIntI64(crate::varint::VarInt(value)) => {
                 self.write_u8_tag(RtonTag::I64)?;
                 self.bytes.write_i64::<LittleEndian>(*value)?;
             }
-            RtonValue::UInt64(value) | RtonValue::VarIntU64(crate::varint::VarInt(value)) => {
+            Value::UInt64(value) | Value::VarIntU64(crate::varint::VarInt(value)) => {
                 self.write_u8_tag(RtonTag::U64)?;
                 self.bytes.write_u64::<LittleEndian>(*value)?;
             }
-            RtonValue::Float(value) => {
+            Value::Float(value) => {
                 self.write_u8_tag(RtonTag::F32)?;
                 self.bytes.write_f32::<LittleEndian>(*value)?;
             }
-            RtonValue::Double(value) => {
+            Value::Double(value) => {
                 self.write_u8_tag(RtonTag::F64)?;
                 self.bytes.write_f64::<LittleEndian>(*value)?;
             }
-            RtonValue::String(value) => {
+            Value::String(value) => {
                 self.write_compact_string(value, false)?;
             }
-            RtonValue::Binary(value) => self.write_binary_blob(value)?,
-            RtonValue::Rtid(value) => {
+            Value::Binary(value) => self.write_binary_blob(value)?,
+            Value::Rtid(value) => {
                 self.write_u8_tag(RtonTag::CompactRtid)?;
                 self.write_rtid_payload(value)?;
             }
-            RtonValue::Array(values) => self.write_array(values)?,
-            RtonValue::Object(entries) => self.write_object(entries)?,
+            Value::Array(values) => self.write_array(values)?,
+            Value::Object(entries) => self.write_object(entries)?,
         }
         Ok(())
     }
 }
 
-impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
+impl<W: Write> ser::Serializer for &mut Serializer<W> {
     type Ok = ();
     type Error = Error;
 
@@ -643,7 +673,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
 
     fn serialize_str(self, v: &str) -> Result<()> {
         if self.pending_rtid {
-            write_utf8_payload(&mut self.writer, v)?;
+            write_utf8_string_payload(&mut self.writer, v)?;
             return Ok(());
         }
         if v == "*" {
@@ -670,7 +700,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
             write!(&mut hex_str, "{:02X}", b)?;
         }
 
-        write_8bit_payload(&mut self.writer, &hex_str)?;
+        write_latin1_string_payload(&mut self.writer, &hex_str)?;
         self.writer.write_varint(v.len() as u64)?;
         self.writer.write_all(v)?;
         Ok(())
@@ -682,7 +712,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
         let count = len.ok_or(Error::UnknownLength)?;
         self.writer.write_u8(RtonTag::ArrayBegin as u8)?;
-        self.writer.write_u8(RtonTag::ArrayLength as u8)?;
+        self.writer.write_u8(RtonTag::ArrayCapacity as u8)?;
         self.writer.write_varint(count as u64)?;
         Ok(self)
     }
@@ -821,7 +851,7 @@ impl<W: Write> ser::Serializer for &mut RtonSerializer<W> {
     }
 }
 
-impl<W: Write> ser::SerializeSeq for &mut RtonSerializer<W> {
+impl<W: Write> ser::SerializeSeq for &mut Serializer<W> {
     type Ok = ();
     type Error = Error;
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
@@ -832,7 +862,7 @@ impl<W: Write> ser::SerializeSeq for &mut RtonSerializer<W> {
         Ok(())
     }
 }
-impl<W: Write> ser::SerializeMap for &mut RtonSerializer<W> {
+impl<W: Write> ser::SerializeMap for &mut Serializer<W> {
     type Ok = ();
     type Error = Error;
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<()> {
@@ -846,7 +876,7 @@ impl<W: Write> ser::SerializeMap for &mut RtonSerializer<W> {
         Ok(())
     }
 }
-impl<W: Write> ser::SerializeStruct for &mut RtonSerializer<W> {
+impl<W: Write> ser::SerializeStruct for &mut Serializer<W> {
     type Ok = ();
     type Error = Error;
     fn serialize_field<T: ?Sized + Serialize>(
@@ -862,7 +892,7 @@ impl<W: Write> ser::SerializeStruct for &mut RtonSerializer<W> {
         Ok(())
     }
 }
-impl<W: Write> ser::SerializeTuple for &mut RtonSerializer<W> {
+impl<W: Write> ser::SerializeTuple for &mut Serializer<W> {
     type Ok = ();
     type Error = Error;
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {

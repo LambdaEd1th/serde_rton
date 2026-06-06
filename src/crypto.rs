@@ -1,3 +1,9 @@
+//! Helpers for PvZ2 encrypted RTON payloads.
+//!
+//! Encrypted payloads start with `[0x10, 0x00]` and then contain
+//! Rijndael-192-CBC ciphertext. These helpers operate only on raw bytes; use
+//! [`crate::from_bytes`] and [`crate::to_bytes`] for the RTON layer.
+
 use crate::error::{Error, Result};
 use md5::{Digest, Md5};
 use simple_rijndael::impls::RijndaelCbc;
@@ -9,9 +15,9 @@ pub const DEFAULT_SEED: &str = "com_popcap_pvz2_magento_product_2013_05_05";
 /// Encrypted RTON prefix — signals that the content is Rijndael-192-CBC ciphertext.
 const ENCRYPTED_PREFIX: [u8; 2] = [0x10, 0x00];
 
-/// Derive Key and IV from a seed string using MD5.
+/// Derives the Rijndael key and IV from a seed string using MD5.
 ///
-/// Returns (Key, IV).
+/// Returns `(key, iv)`.
 pub fn derive_key_iv(seed: &str) -> (Vec<u8>, Vec<u8>) {
     let digest: [u8; 16] = Md5::digest(seed.as_bytes()).into();
     let hex_string = hex::encode(digest); // String (32 chars)
@@ -22,7 +28,7 @@ pub fn derive_key_iv(seed: &str) -> (Vec<u8>, Vec<u8>) {
     (key, iv)
 }
 
-/// Encrypt data and prepend the encrypted-RTON prefix `[0x10, 0x00]`.
+/// Encrypts plaintext bytes and prepends the encrypted-RTON prefix.
 ///
 /// Output format: `ENCRYPTED_PREFIX || Rijndael-192-CBC(ciphertext)`.
 pub fn encrypt_data(data: &[u8]) -> Result<Vec<u8>> {
@@ -42,7 +48,7 @@ pub fn encrypt_data(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Decrypt data that starts with the encrypted-RTON prefix `[0x10, 0x00]`.
+/// Decrypts bytes that start with the encrypted-RTON prefix `[0x10, 0x00]`.
 ///
 /// Strips the prefix, then decrypts the remainder with Rijndael-192-CBC.
 pub fn decrypt_data(data: &[u8]) -> Result<Vec<u8>> {
