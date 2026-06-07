@@ -1,7 +1,6 @@
 # serde_rton
 
-`serde_rton` is a Serde-based reader and writer for PopCap/PvZ2 RTON
-(Reflection Object Notation) files.
+`serde_rton` is a Serde-based reader and writer for PopCap/PvZ2 RTON files.
 
 The crate focuses on binary RTON. For JSON, use `serde_json` directly with
 Serde. There is no separate PvZ2 JSON bridge API in this crate.
@@ -259,7 +258,7 @@ fn main() -> serde_rton::Result<()> {
 | Strings | `String` / `Value::String` | Standard writer interns strings by default |
 | Direct strings | `DirectStr<T>` | Forces direct string tags |
 | BinaryBlob | `BinaryBlob` / `Value::Binary` | Human-readable JSON emits `$BINARY(...)` text |
-| RTID | `Rtid` / `Value::Rtid` | Human-readable JSON emits RTID strings |
+| RTID | `Rtid` / `Value::Rtid` | Serialized SexyAppFramework `RtId`; human-readable JSON emits RTID strings |
 | Array | `Vec<T>` / `Value::Array` | Standard arrays may end before declared capacity |
 | Object | structs/maps / `Value::Object` | `Value` preserves order and duplicate keys |
 
@@ -269,7 +268,7 @@ fn main() -> serde_rton::Result<()> {
 - `src/de.rs`: RTON deserializer.
 - `src/ser.rs`: standard and compact RTON serializers.
 - `src/value.rs`: dynamic `Value` AST and Serde implementation.
-- `src/rtid.rs`: RTID value parsing and serialization.
+- `src/rtid.rs`: SexyAppFramework `RtId` value parsing and serialization.
 - `src/tags.rs`: file markers and tag identifiers.
 - `src/binary.rs`: `BinaryBlob` support.
 - `src/varint.rs`: `VarInt` and `DirectStr` wrappers.
