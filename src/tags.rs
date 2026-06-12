@@ -56,17 +56,11 @@ pub enum RtonTag {
     ZigZagVarInt32 = 0x25,
     /// Unsigned varint (adaptive in PvZ2's dedicated unsigned writer).
     UnsignedVarInt32 = 0x28,
-    /// Deprecated signed zigzag varint alt from older RTON variants.
-    #[deprecated(note = "0x29 is an older RTON signed zigzag varint tag")]
-    DeprecatedZigZagVarInt32 = 0x29,
 
     RawVarInt64 = 0x44,
     ZigZagVarInt64 = 0x45,
     /// Unsigned varint alt (adaptive in PvZ2's dedicated unsigned writer).
     UnsignedVarInt64 = 0x48,
-    /// Deprecated signed zigzag varint alt from older RTON variants.
-    #[deprecated(note = "0x49 is an older RTON signed zigzag varint tag")]
-    DeprecatedZigZagVarInt64 = 0x49,
 
     F32 = 0x22,
     F32Zero = 0x23,

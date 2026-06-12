@@ -130,12 +130,6 @@ mod tests {
         a: Option<Rtid>,
     }
 
-    #[derive(Debug, Deserialize, PartialEq)]
-    struct DeprecatedSignedFields {
-        old32: i32,
-        old64: i64,
-    }
-
     fn payload_tag(bytes: &[u8]) -> u8 {
         bytes[FILE_HEADER.len() + 4]
     }
@@ -493,30 +487,18 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn test_deprecated_signed_alt_varint_tags_deserialize() {
-        use integer_encoding::VarIntWriter;
+    fn test_removed_signed_alt_varint_tags_are_rejected() {
+        for tag in [0x29, 0x49] {
+            let mut bytes = compact_file_prefix_with_version(FILE_VERSION);
+            push_standard_latin1_def(&mut bytes, "old");
+            bytes.push(tag);
+            bytes.push(0);
+            bytes.push(RtonTag::ObjectEnd as u8);
+            finish_compact_file(&mut bytes);
 
-        let mut bytes = compact_file_prefix_with_version(FILE_VERSION);
-        push_standard_latin1_def(&mut bytes, "old32");
-        bytes.push(RtonTag::DeprecatedZigZagVarInt32 as u8);
-        bytes.write_varint(-1i32).expect("write varint");
-
-        push_standard_latin1_def(&mut bytes, "old64");
-        bytes.push(RtonTag::DeprecatedZigZagVarInt64 as u8);
-        bytes.write_varint(-2i64).expect("write varint");
-
-        bytes.push(RtonTag::ObjectEnd as u8);
-        finish_compact_file(&mut bytes);
-
-        let decoded = from_bytes::<DeprecatedSignedFields>(&bytes).expect("deprecated tags");
-        assert_eq!(
-            decoded,
-            DeprecatedSignedFields {
-                old32: -1,
-                old64: -2
-            }
-        );
+            let error = from_bytes::<Value>(&bytes).expect_err("removed tag should be rejected");
+            assert!(matches!(error, Error::UnknownTag(t) if t == tag));
+        }
     }
 
     #[test]

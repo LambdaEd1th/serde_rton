@@ -409,14 +409,6 @@ impl<'de, R: Read + Seek> de::Deserializer<'de> for &mut Deserializer<'de, R> {
             RtonTag::UnsignedVarInt64 => visitor.visit_u64(self.reader.read_varint::<u64>()?),
             RtonTag::ZigZagVarInt32 => visitor.visit_i32(self.reader.read_varint::<i32>()?),
             RtonTag::ZigZagVarInt64 => visitor.visit_i64(self.reader.read_varint::<i64>()?),
-            #[allow(deprecated)]
-            RtonTag::DeprecatedZigZagVarInt32 => {
-                visitor.visit_i32(self.reader.read_varint::<i32>()?)
-            }
-            #[allow(deprecated)]
-            RtonTag::DeprecatedZigZagVarInt64 => {
-                visitor.visit_i64(self.reader.read_varint::<i64>()?)
-            }
 
             RtonTag::F32 => visitor.visit_f32(read_primitive!(self.reader, read_f32)),
             RtonTag::F32Zero => visitor.visit_f32(0.0),
