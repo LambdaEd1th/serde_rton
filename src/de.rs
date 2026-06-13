@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{Error, Result};
-use crate::tags::{FILE_FOOTER, FILE_HEADER, STANDARD_FILE_VERSION, RtidPayloadTag, RtonTag};
+use crate::tags::{FILE_FOOTER, FILE_HEADER, RtidPayloadTag, RtonTag, STANDARD_FILE_VERSION};
 
 /// Serde deserializer for RTON streams.
 ///
