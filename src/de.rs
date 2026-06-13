@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{Error, Result};
-use crate::tags::{FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtidPayloadTag, RtonTag};
+use crate::tags::{FILE_FOOTER, FILE_HEADER, STANDARD_FILE_VERSION, RtidPayloadTag, RtonTag};
 
 /// Serde deserializer for RTON streams.
 ///
@@ -136,7 +136,7 @@ fn validate_header<R: Read + Seek>(reader: &mut R) -> Result<()> {
     let version_lo = reader.read_u16::<LittleEndian>()?;
     let version_hi = reader.read_u16::<LittleEndian>()?;
     let version = (u32::from(version_hi) << 16) | u32::from(version_lo);
-    if u32::from(version_lo) != FILE_VERSION || version_hi > 1 {
+    if u32::from(version_lo) != STANDARD_FILE_VERSION || version_hi > 1 {
         return Err(Error::Message(format!("Unsupported version: {}", version)));
     }
 

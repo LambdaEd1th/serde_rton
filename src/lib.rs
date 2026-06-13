@@ -90,7 +90,7 @@ pub use ser::{Serializer, to_bytes, to_compact_bytes, to_compact_writer, to_writ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tags::{COMPACT_FILE_VERSION, FILE_FOOTER, FILE_HEADER, FILE_VERSION};
+    use crate::tags::{COMPACT_FILE_VERSION, FILE_FOOTER, FILE_HEADER, STANDARD_FILE_VERSION};
     use serde::{Deserialize, Serialize};
     use std::io::Cursor;
     use std::str::FromStr;
@@ -158,7 +158,7 @@ mod tests {
     fn standard_file_prefix() -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(FILE_HEADER);
-        bytes.extend_from_slice(&FILE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&STANDARD_FILE_VERSION.to_le_bytes());
         bytes
     }
 
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn test_removed_signed_alt_varint_tags_are_rejected() {
         for tag in [0x29, 0x49] {
-            let mut bytes = compact_file_prefix_with_version(FILE_VERSION);
+            let mut bytes = compact_file_prefix_with_version(STANDARD_FILE_VERSION);
             push_standard_latin1_def(&mut bytes, "old");
             bytes.push(tag);
             bytes.push(0);

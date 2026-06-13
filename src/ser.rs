@@ -14,7 +14,7 @@ use std::io::Write;
 use crate::binary::BinaryBlob;
 use crate::error::{Error, Result};
 use crate::rtid::Rtid;
-use crate::tags::{COMPACT_FILE_VERSION, FILE_FOOTER, FILE_HEADER, FILE_VERSION, RtonTag};
+use crate::tags::{COMPACT_FILE_VERSION, FILE_FOOTER, FILE_HEADER, STANDARD_FILE_VERSION, RtonTag};
 use crate::value::Value;
 
 // === Helper Functions for String Writing ===
@@ -68,7 +68,7 @@ fn zigzag_i64(value: i64) -> u64 {
 
 fn write_header<W: Write>(writer: &mut W) -> Result<()> {
     writer.write_all(FILE_HEADER)?;
-    writer.write_u32::<LittleEndian>(FILE_VERSION)?;
+    writer.write_u32::<LittleEndian>(STANDARD_FILE_VERSION)?;
     Ok(())
 }
 

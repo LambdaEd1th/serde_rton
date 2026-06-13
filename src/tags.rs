@@ -12,7 +12,7 @@ pub const FILE_HEADER: &[u8] = b"RTON";
 /// Standard RTON footer marker.
 pub const FILE_FOOTER: &[u8] = b"DONE";
 /// Standard RTON low-word file version.
-pub const FILE_VERSION: u32 = 1;
+pub const STANDARD_FILE_VERSION: u32 = 1;
 /// PvZ2 compact runtime RTON file version.
 pub const COMPACT_FILE_VERSION: u32 = 0x0001_0001;
 
