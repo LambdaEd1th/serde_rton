@@ -14,7 +14,7 @@ use std::io::Write;
 use crate::binary::BinaryBlob;
 use crate::error::{Error, Result};
 use crate::rtid::Rtid;
-use crate::tags::{COMPACT_FILE_VERSION, FILE_FOOTER, FILE_HEADER, STANDARD_FILE_VERSION, RtonTag};
+use crate::tags::{COMPACT_FILE_VERSION, FILE_FOOTER, FILE_HEADER, RtonTag, STANDARD_FILE_VERSION};
 use crate::value::Value;
 
 // === Helper Functions for String Writing ===
