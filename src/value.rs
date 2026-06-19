@@ -282,6 +282,10 @@ impl<'de> Deserialize<'de> for Value {
                 Ok(Value::Binary(BinaryBlob(v)))
             }
 
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(Value::Rtid(Rtid::Null))
+            }
+
             fn visit_none<E>(self) -> Result<Self::Value, E> {
                 Ok(Value::Rtid(Rtid::Null))
             }
