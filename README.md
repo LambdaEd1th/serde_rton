@@ -16,7 +16,8 @@ Serde. There is no separate PvZ2 JSON bridge API in this crate.
 - Write compact runtime RTON with `to_compact_bytes` / `to_compact_writer`.
 - Support RTID values, BinaryBlob values, string interning, direct strings, and
   explicit VarInt wrappers.
-- Provide Rijndael-192-CBC helpers for encrypted PvZ2 RTON payloads.
+- Provide optional Rijndael-192-CBC helpers for encrypted PvZ2 RTON payloads
+  behind the `crypto` feature.
 
 ## Installation
 
@@ -31,6 +32,12 @@ For local development inside this repository:
 
 ```toml
 serde_rton = { path = "." }
+```
+
+Enable encrypted-RTON helpers with:
+
+```toml
+serde_rton = { path = ".", default-features = false, features = ["crypto"] }
 ```
 
 ## RTON to JSON with serde_json

@@ -5,8 +5,12 @@
 //! [`crate::from_bytes`] and [`crate::to_bytes`] for the RTON layer.
 
 use crate::error::{Error, Result};
+
+#[cfg(feature = "crypto")]
 use md5::{Digest, Md5};
+#[cfg(feature = "crypto")]
 use simple_rijndael::impls::RijndaelCbc;
+#[cfg(feature = "crypto")]
 use simple_rijndael::paddings::ZeroPadding;
 
 /// The standard encryption seed used by PvZ2 RTON files.
@@ -18,6 +22,7 @@ const ENCRYPTED_PREFIX: [u8; 2] = [0x10, 0x00];
 /// Derives the Rijndael key and IV from a seed string using MD5.
 ///
 /// Returns `(key, iv)`.
+#[cfg(feature = "crypto")]
 fn derive_key_iv(seed: &str) -> (Vec<u8>, Vec<u8>) {
     let digest: [u8; 16] = Md5::digest(seed.as_bytes()).into();
     let hex_string = hex::encode(digest); // String (32 chars)
@@ -31,6 +36,7 @@ fn derive_key_iv(seed: &str) -> (Vec<u8>, Vec<u8>) {
 /// Encrypts plaintext bytes and prepends the encrypted-RTON prefix.
 ///
 /// Output format: `ENCRYPTED_PREFIX || Rijndael-192-CBC(ciphertext)`.
+#[cfg(feature = "crypto")]
 pub fn encrypt_data(data: &[u8]) -> Result<Vec<u8>> {
     let (key, iv) = derive_key_iv(DEFAULT_SEED);
     let block_size = 24;
@@ -48,9 +54,17 @@ pub fn encrypt_data(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+#[cfg(not(feature = "crypto"))]
+pub fn encrypt_data(_data: &[u8]) -> Result<Vec<u8>> {
+    Err(Error::Message(
+        "serde_rton was built without the `crypto` feature. Enable it to use encrypt_data.".into(),
+    ))
+}
+
 /// Decrypts bytes that start with the encrypted-RTON prefix `[0x10, 0x00]`.
 ///
 /// Strips the prefix, then decrypts the remainder with Rijndael-192-CBC.
+#[cfg(feature = "crypto")]
 pub fn decrypt_data(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < 2 || data[..2] != ENCRYPTED_PREFIX {
         return Err(Error::DecryptionError(
@@ -71,6 +85,20 @@ pub fn decrypt_data(data: &[u8]) -> Result<Vec<u8>> {
     Ok(decrypted)
 }
 
+#[cfg(not(feature = "crypto"))]
+pub fn decrypt_data(data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() < 2 || data[..2] != ENCRYPTED_PREFIX {
+        return Err(Error::DecryptionError(
+            "Input does not start with encrypted-RTON prefix [0x10, 0x00]".into(),
+        ));
+    }
+
+    Err(Error::Message(
+        "serde_rton was built without the `crypto` feature. Enable it to use decrypt_data.".into(),
+    ))
+}
+
+#[cfg(feature = "crypto")]
 #[cfg(test)]
 mod tests {
     use super::*;
