@@ -57,7 +57,7 @@ pub fn encrypt_data(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(not(feature = "crypto"))]
 pub fn encrypt_data(_data: &[u8]) -> Result<Vec<u8>> {
     Err(Error::Message(
-        "serde_rton was built without the `crypto` feature. Enable it to use encrypt_data.".into(),
+        "serde-rton was built without the `crypto` feature. Enable it to use encrypt_data.".into(),
     ))
 }
 
@@ -94,7 +94,7 @@ pub fn decrypt_data(data: &[u8]) -> Result<Vec<u8>> {
     }
 
     Err(Error::Message(
-        "serde_rton was built without the `crypto` feature. Enable it to use decrypt_data.".into(),
+        "serde-rton was built without the `crypto` feature. Enable it to use decrypt_data.".into(),
     ))
 }
 

@@ -1,6 +1,6 @@
-# serde_rton
+# serde-rton
 
-`serde_rton` is a Serde-based reader and writer for PopCap/PvZ2 RTON files.
+`serde-rton` is a Serde-based reader and writer for PopCap/PvZ2 RTON files.
 
 The crate focuses on binary RTON. For JSON, use `serde_json` directly with
 Serde. There is no separate PvZ2 JSON bridge API in this crate.
@@ -25,19 +25,19 @@ Serde. There is no separate PvZ2 JSON bridge API in this crate.
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0" # only needed if you want JSON output/input
-serde_rton = { git = "https://github.com/LambdaEd1th/serde_rton" }
+serde-rton = { git = "https://github.com/LambdaEd1th/serde-rton" }
 ```
 
 For local development inside this repository:
 
 ```toml
-serde_rton = { path = "." }
+serde-rton = { path = "." }
 ```
 
 Enable encrypted-RTON helpers with:
 
 ```toml
-serde_rton = { path = ".", default-features = false, features = ["crypto"] }
+serde-rton = { path = ".", default-features = false, features = ["crypto"] }
 ```
 
 ## RTON to JSON with serde_json

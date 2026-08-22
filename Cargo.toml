@@ -1,12 +1,12 @@
 [package]
-name = "serde_rton"
+name = "serde-rton"
 version = "0.4.0"
 edition = "2024"
 authors = ["ed1th"]
 categories = ["encoding", "parser-implementations"]
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/LambdaEd1th/serde_rton"
+repository = "https://github.com/LambdaEd1th/serde-rton"
 
 [features]
 default = []
