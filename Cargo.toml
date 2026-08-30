@@ -13,19 +13,19 @@ default = []
 crypto = ["dep:hex", "dep:md-5", "dep:simple-rijndael"]
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-thiserror = "2.0"
-byteorder = "1.5"
-regex = "1.12"
-num_enum = "0.7"
-integer-encoding = "4.1"
-simple-rijndael = { version = "0.3", optional = true }
-md-5 = { version = "0.11", optional = true }
-hex = { version = "0.4", optional = true }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+byteorder = "1.5.0"
+regex = "1.13.1"
+num_enum = "0.7.6"
+integer-encoding = "4.1.0"
+simple-rijndael = { version = "0.3.2", optional = true }
+md-5 = { version = "0.11.0", optional = true }
+hex = { version = "0.4.3", optional = true }
 
 [dev-dependencies]
-serde_json = "1.0"
-serde_yaml = "0.9"
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
 
 [package.metadata.docs.rs]
 all-features = true
